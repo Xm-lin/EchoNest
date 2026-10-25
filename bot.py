@@ -240,9 +240,18 @@ class CharacterModal(discord.ui.Modal):
                 f'（{personality}，ID：{cid}）。', ephemeral=True)
         except ValueError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
-        except Exception:
-            log.exception('Character save failed')
-            await interaction.followup.send('角色儲存失敗，請查看 Render Logs 中 Character save failed 的詳細錯誤。', ephemeral=True)
+        except Exception as e:
+            import traceback
+
+            print("=== CHARACTER SAVE ERROR ===", flush=True)
+            traceback.print_exc()
+            print(f"Error type: {type(e).__name__}", flush=True)
+            print("=== END ERROR ===", flush=True)
+
+            await interaction.followup.send(
+                "角色儲存失敗，請查看 Render Logs。",
+                ephemeral=True
+            )
 
 
 class PersonalitySelect(discord.ui.Select):
