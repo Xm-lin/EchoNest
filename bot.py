@@ -443,10 +443,37 @@ async def chat(interaction: discord.Interaction, 內容: str):
                     WHERE scope=%s AND user_id=%s AND character_id=%s
                     AND (last_reward_at IS NULL OR last_reward_at<NOW()-INTERVAL '60 seconds')''',
                     (scope, uid, cid))
-        await asyncio.to_thread(save)
-        embed = discord.Embed(description=reply[:3900], color=discord.Color.blurple())
-        embed.set_author(name=c['name'], icon_url=image_url(c['image_path']))
-        await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await asyncio.to_thread(save)   
+        await interaction.followup.send("角色已回覆。", ephemeral=True)
+
+        channel = interaction.channel
+
+        if isinstance(channel, discord.TextChannel):
+            # 尋找既有的 EchoNest Webhook
+            webhooks = await channel.webhooks()
+            webhook = next(
+                (w for w in webhooks if w.name == "EchoNest" and w.user == bot.user),
+                None
+            )
+
+            if webhook is None:
+                webhook = await channel.create_webhook(name="EchoNest")
+
+            await webhook.send(
+                content=reply[:2000],
+                username=c["name"],
+                avatar_url=image_url(c["image_path"]) or None,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+        else:
+            # 私訊或其他不支援 Webhook 的頻道
+            embed = discord.Embed(description=reply[:3900])
+            embed.set_author(
+                name=c["name"],
+                icon_url=image_url(c["image_path"])
+            )
+            await interaction.followup.send(embed=embed)
+
         await update_memory(scope, uid, cid)
     except Exception:
         log.exception('Chat failed')
