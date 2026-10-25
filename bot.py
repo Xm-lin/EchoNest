@@ -328,11 +328,30 @@ async def character_status(interaction: discord.Interaction):
     p = await guarded(interaction, lambda: get_profile(scope, uid, c['id']))
     if p is None:
         return
-    embed = discord.Embed(title=c['name'], description=f'心情：{c["mood"]}\n好感度：{hearts(p["affection"])}')
-    embed.add_field(name='等級', value=f'Lv.{level(p["exp"])}')
-    embed.add_field(name='EXP', value=f'{p["exp"] % 100}/100')
-    if image_url(c['image_path']):
-        embed.set_thumbnail(url=image_url(c['image_path']))
+    embed = discord.Embed(
+        title=c['name'],
+        description=(
+            f'心情：{c["mood"]}\n'
+            f'好感度：{hearts(p["affection"])}'
+        ),
+        color=discord.Color.blurple()
+    )
+
+    embed.add_field(
+        name='等級',
+        value=f'Lv.{level(p["exp"])}',
+        inline=True
+    )
+
+    embed.add_field(
+        name='EXP',
+        value=f'{p["exp"] % 100}/100',
+        inline=True
+    )
+
+    url = image_url(c['image_path'])
+    if url:
+        embed.set_image(url=url)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
