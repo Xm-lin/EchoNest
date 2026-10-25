@@ -240,18 +240,9 @@ class CharacterModal(discord.ui.Modal):
                 f'（{personality}，ID：{cid}）。', ephemeral=True)
         except ValueError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
-        except Exception as e:
-            import traceback
-
-            print("=== CHARACTER SAVE ERROR ===", flush=True)
-            traceback.print_exc()
-            print(f"Error type: {type(e).__name__}", flush=True)
-            print("=== END ERROR ===", flush=True)
-
-            await interaction.followup.send(
-                "角色儲存失敗，請查看 Render Logs。",
-                ephemeral=True
-            )
+        except Exception:
+            log.exception('Character save failed')
+            await interaction.followup.send('角色儲存失敗，請查看 Render Logs 中 Character save failed 的詳細錯誤。', ephemeral=True)
 
 
 class PersonalitySelect(discord.ui.Select):
@@ -352,6 +343,126 @@ async def edit_character(interaction: discord.Interaction, 圖片: discord.Attac
     await interaction.response.send_message(
         '選擇新的角色個性，再修改角色資料：',
         view=PersonalityView(interaction, image=圖片, cid=c['id'], initial=c), ephemeral=True)
+
+
+
+async def remove_character_image(path):
+    if not path:
+        return
+    endpoint = f'{SUPABASE_URL}/storage/v1/object/{quote(BUCKET)}/{quote(path, safe="/")}'
+    async with httpx.AsyncClient(timeout=25) as client:
+        response = await client.delete(
+            endpoint,
+            headers={'Authorization': f'Bearer {STORAGE_KEY}', 'apikey': STORAGE_KEY}
+        )
+        response.raise_for_status()
+
+
+class DeleteCharacterView(discord.ui.View):
+    def __init__(self, owner_id, scope, characters):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.scope = scope
+        self.characters = {str(c['id']): c for c in characters}
+        self.selected_id = None
+        self.confirm_button.disabled = True
+        options = [
+            discord.SelectOption(
+                label=c['name'][:100],
+                value=str(c['id']),
+                description=f"ID: {c['id']}｜{c['personality']}"[:100]
+            ) for c in characters[:25]
+        ]
+        self.character_select.options = options
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message('只有發起刪除的人可以操作。', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(placeholder='選擇要刪除的角色', options=[
+        discord.SelectOption(label='載入中', value='placeholder')
+    ])
+    async def character_select(self, interaction, select):
+        self.selected_id = select.values[0]
+        self.confirm_button.disabled = False
+        c = self.characters[self.selected_id]
+        await interaction.response.edit_message(
+            content=f'確定刪除 **{discord.utils.escape_markdown(c["name"])}**（ID：{c["id"]}）嗎？'
+                    '\\n聊天記憶、好感度及經驗值會一併刪除，無法復原。',
+            view=self
+        )
+
+    @discord.ui.button(label='確認刪除', style=discord.ButtonStyle.danger, disabled=True)
+    async def confirm_button(self, interaction, button):
+        if not self.selected_id:
+            return await interaction.response.send_message('請先選擇角色。', ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        cid = int(self.selected_id)
+        uid = str(interaction.user.id)
+        def delete_from_database():
+            with db.transaction() as conn:
+                c = conn.execute(
+                    'SELECT id,name,image_path,created_by FROM bot_characters '
+                    'WHERE scope=%s AND id=%s FOR UPDATE',
+                    (self.scope, cid)
+                ).fetchone()
+                if not c:
+                    return None, '找不到角色，可能已經被刪除。'
+                if c['created_by'] != uid and not may_edit(interaction):
+                    return None, '只有建立者或伺服器管理員能刪除此角色。'
+                conn.execute('DELETE FROM bot_characters WHERE scope=%s AND id=%s',
+                             (self.scope, cid))
+                # bot_active、bot_profiles、bot_messages、bot_memories
+                # 透過 PostgreSQL ON DELETE CASCADE 自動清除。
+                return c, None
+        try:
+            c, error = await asyncio.to_thread(delete_from_database)
+            if error:
+                return await interaction.followup.send(error, ephemeral=True)
+            image_warning = ''
+            if c['image_path']:
+                try:
+                    await remove_character_image(c['image_path'])
+                except Exception:
+                    log.exception('Character image cleanup failed for id %s', cid)
+                    image_warning = '\\n⚠️ 角色已刪除，但 Storage 圖片清理失敗，請到 Supabase 手動移除。'
+            for item in self.children:
+                item.disabled = True
+            await interaction.edit_original_response(
+                content=f'已刪除角色 **{discord.utils.escape_markdown(c["name"])}**（ID：{cid}）。'
+                        + image_warning,
+                view=self
+            )
+        except Exception:
+            log.exception('Character delete failed')
+            await interaction.followup.send('刪除失敗，請查看 Render Logs。', ephemeral=True)
+
+    @discord.ui.button(label='取消', style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction, button):
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content='已取消刪除。', view=self)
+
+
+@bot.tree.command(name='刪除角色', description='選擇角色並確認刪除（建立者或管理員）')
+@command
+async def delete_character(interaction: discord.Interaction):
+    scope, uid = scope_of(interaction), str(interaction.user.id)
+    def work():
+        rows = list_characters(scope)
+        return [c for c in rows if c['created_by'] == uid or may_edit(interaction)]
+    rows = await guarded(interaction, work)
+    if rows is None:
+        return
+    if not rows:
+        return await interaction.followup.send('目前沒有你可以刪除的角色。', ephemeral=True)
+    await interaction.followup.send(
+        '選擇要刪除的角色（刪除後無法復原）：',
+        view=DeleteCharacterView(interaction.user.id, scope, rows[:25]),
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name='切換角色', description='切換目前互動的角色（輸入角色 ID）')
