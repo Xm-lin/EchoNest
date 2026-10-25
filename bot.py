@@ -131,7 +131,11 @@ async def upload_image(attachment, scope):
     mime = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'webp': 'image/webp'}.get(ext)
     if mime is None or (attachment.content_type and attachment.content_type != mime):
         raise ValueError('只支援 PNG、JPG、WEBP 圖片。')
-    data = await attachment.read()
+    try:
+        data = await attachment.read()
+    except Exception:
+        log.exception("Discord attachment download failed")
+        raise
     if len(data) > 5 * 1024 * 1024:
         raise ValueError('圖片不能超過 5 MB。')
     signatures = {'png': data.startswith(b'\x89PNG\r\n\x1a\n'),
