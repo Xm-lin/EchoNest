@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: discord-character-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
