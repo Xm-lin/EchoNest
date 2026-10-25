@@ -39,14 +39,20 @@ class Bot(commands.Bot):
 bot = Bot(command_prefix="!", intents=intents)
 
 
-def scope_of(interaction):
-    # Server-installed command uses server data; user-installed command uses personal data.
-    owners = interaction.authorizing_integration_owners or {}
-    guild_owner = owners.get(discord.AppIntegrationType.guild_install)
-    if interaction.guild_id and guild_owner is not None:
-        return f"guild:{interaction.guild_id}"
-    return f"user:{interaction.user.id}"
+def scope_of(interaction: discord.Interaction):
+    owners = interaction.authorizing_integration_owners if hasattr(
+        interaction, "authorizing_integration_owners"
+    ) else None
 
+    if owners:
+        guild_owner = owners.get(discord.AppIntegrationType.guild_install)
+        if interaction.guild_id and guild_owner:
+            return f"guild:{interaction.guild_id}"
+
+    if interaction.guild_id:
+        return f"guild:{interaction.guild_id}"
+
+    return f"user:{interaction.user.id}"
 
 def ensure(scope, uid):
     db.execute("INSERT OR IGNORE INTO characters(scope) VALUES(?)", (scope,))
