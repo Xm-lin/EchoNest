@@ -1,89 +1,53 @@
-# EchoNest — Discord AI 多角色養成 Bot
+# EchoNest v5 — Discord 角色養成遊戲
 
-支援繁體中文 Slash Commands、Gemini、Supabase PostgreSQL + Storage、Docker / Render。
+基於 v4 升級，保留既有 Discord / Gemini / Supabase 架構，新增故事探索、收藏、每週任務與大圖角色檔案。**不需重建資料庫、不需清空舊角色。**
 
-## 指令（9 個）
+## 遊戲玩法
 
-| 指令 | 功能 |
-|---|---|
-| `/建立角色 [圖片]` | 上傳 PNG/JPG/WEBP（選填）後開啟表單，填寫名稱、個性、背景、說話風格；建立時生成獨立 System Message |
-| `/角色列表` | 列出角色 ID、名稱、個性與目前角色；空列表也能使用 |
-| `/角色狀態` | 查看目前角色、好感度、等級、EXP、圖片 |
-| `/角色設定 [圖片]` | 透過表單修改目前角色，可更換圖片；重新生成該角色的 System Message |
-| `/切換角色 角色id` | 根據角色列表中的 ID 切換角色 |
-| `/聊天 內容` | Gemini 對話，按角色、使用者隔離對話記錄與摘要 |
-| `/背包` | 查看使用者道具 |
-| `/簽到` | 台灣時間每日一次，領取隨機道具 |
-| `/送禮 道具` | 消耗道具，增加目前角色的好感度 |
+1. `/建立角色 [圖片]`：選擇個性、填入背景、上傳角色圖（可選）。
+2. `/角色狀態`：先顯示**大張角色圖片**，下一則私密訊息顯示名稱、關係階段、心情、好感度、等級、EXP 條。
+3. `/聊天 內容`：Gemini 角色對話及好感度評分，對話記憶依角色及使用者隔離；60 秒內至多一次 EXP / 好感度結算。
+4. `/探索`：六種故事事件，每次三個不同選擇；獲得 EXP、好感度與角色專屬紀念品。每個角色每天最多完成 3 次（台灣時間）；未完成事件可在 20 分鐘內再次 `/探索`。
+5. `/任務`：每週三項目標（聊天結算 3 次、探索 2 次、送禮 1 次），達成時**自動**領取 EXP +35 與禮物盒 ×1；每週一重置，沒有連續登入懲罰。
+6. `/收藏`：查看紀念品與最近五段故事回憶，收藏以使用者及角色分開保存。
+7. `/簽到`、`/背包`、`/送禮`：保留 v4 道具系統。
+8. `/角色列表`、`/切換角色`、`/角色設定`、`/刪除角色`：保留原功能。
 
-**沒有任何角色時，只有 `/建立角色` 和 `/角色列表` 能使用。** 不會自動建立預設角色。每隻角色的 System Message 在建立時由欄位組合生成並儲存；修改角色時更新。背包和簽到按使用者及空間儲存，好感度、EXP、對話、記憶按使用者 + 角色儲存。
+總計 **13 個全域 Slash Commands**。角色關係階段依好感度分為初識、熟悉、信任、知己；角色互動不需要生成圖片 API，僅上傳使用者提供的圖片。故事事件使用預先編寫的文本，不額外消耗 Gemini API 額度。
 
-## 部署前準備
+## 部署到 Render
 
-1. **Discord Developer Portal** → 建立 Application → Bot → Reset Token，取得 `DISCORD_TOKEN`。在 Installation 設定 Guild Install 和 User Install，Scopes 選 `bot`、`applications.commands`，Bot Permissions 至少 Send Messages / Embed Links。重新邀請 Bot 以確保授權生效。
-2. **Supabase** 建立 Project → Connect → 選 **Session Pooler** 的 PostgreSQL URI 作為 `DATABASE_URL`，並將密碼正確 URL encode。若遇到連線問題，先確認 pooler 與 IPv4 可用。
-3. **Supabase Storage** → 建立名稱 `characters` 的 **Public bucket**（這樣 Discord 才能讀取角色圖片）。角色圖片公開可讀，請勿上傳私密照片。圖片檔最大 5 MB。
-4. Supabase Project Settings / API Keys 取得 Project URL `SUPABASE_URL` 與 **service_role / secret key** `SUPABASE_SERVICE_ROLE_KEY`。此金鑰可繞過 RLS，**只能放 Render Environment，絕對不要放前端或 GitHub**。
-5. Gemini API Key 設為 `GEMINI_API_KEY`，模型名稱 `GEMINI_MODEL`（預設 `gemini-2.5-flash`）。
+1. 先備份 Supabase 資料庫。把 ZIP **內的檔案**上傳至 GitHub Repo 根目錄（包括新增 `game.py`）。
+2. Render → EchoNest → Environment，設定：
 
-## Render
-
-將此資料夾內容推上 GitHub（`.env` 不要上傳），Render → New Web Service → 連接 Repo → Runtime Docker → Free。設定以下 Environment：
-
-```
+```dotenv
 DISCORD_TOKEN=...
 GEMINI_API_KEY=...
 GEMINI_MODEL=gemini-2.5-flash
 DATABASE_URL=postgresql://...
-SUPABASE_URL=https://PROJECT.supabase.co
+SUPABASE_URL=https://你的專案.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
 SUPABASE_STORAGE_BUCKET=characters
 ```
 
-`PORT` 由 Render 提供（本機預設 10000）。啟動時自動建立 `bot_*` 資料表；不會覆蓋舊版資料表。`/health` 在 Bot 真正登入 Discord 後回應 HTTP 200。Render 免費方案可能休眠；UptimeRobot 定期檢查不保證免費方案永久在線，且需遵守平台政策。
+3. Supabase Storage 建立名稱為 `characters` 的 **Public** bucket。`SUPABASE_URL` 請填專案根網址，**不要附 `/rest/v1`**（程式也有防呆修正）。
+4. Render → Manual Deploy → Deploy latest commit。Logs 應出現 `Synced 13 global slash commands`。
+5. Discord 執行 `/建立角色`（可先不附圖測試），再測 `/角色狀態`、`/探索`、`/任務`、`/收藏`。
 
-## 本機執行
+新資料表會由 `database.py` 的 `CREATE TABLE IF NOT EXISTS` 自動建立；舊有角色與聊天資料不會被刪除。新功能需要 Supabase DB 帳號具有建立資料表的權限。
+
+## 測試
 
 ```bash
-cp .env.example .env
-# 編輯 .env，填入環境變數
-python -m pip install -r requirements.txt
-python bot.py
+python tests/test_static.py
+python tests/test_game.py
+python -m compileall -q bot.py database.py game.py
 ```
 
-或 `docker compose up --build`。請使用 Python 3.12+。
+這些是本地靜態與內容測試，**不等於已連線 Discord、Supabase、Gemini 完成端對端測試**。
 
-## 重要限制
+## 注意事項
 
-- **Guild Install 與 User Install 在同一伺服器內的空間隔離**：目前 `discord.py` 沒有公開 `authorizing_integration_owners` 屬性，因此採「伺服器內 → guild 空間；DM / 私人頻道 → user 空間」的保守規則。若同一伺服器內同時存在兩種安裝模式，**不能保證區分**，請勿將其視為完全隔離。未來需改用支援 interaction authorizing owners 的底層 payload 或函式庫。
-- 建立與修改伺服器角色需要 Manage Server 權限；其他使用者可聊天、切換角色並各自養成。個人空間只允許本人使用。
-- 圖片採 Supabase Storage Public bucket，僅公開圖片；其他資料留在 PostgreSQL。
-- 目前不提供刪除角色功能；舊版單角色資料不自動轉移。
-- 長期摘要每 40 筆新訊息整理一次，聊天內容僅送往設定的 Gemini API。
-- Discord Global Slash Commands 更新可能需要一些時間才會顯示。
-
-## 排錯
-
-- `AttributeError: authorizing_integration_owners`：新版不再使用此屬性。
-- 「應用程式沒有回應」：檢查 Render Logs；資料庫操作已移至執行緒，先回覆 defer。
-- Storage 上傳失敗：確認 bucket 名稱、Public 設定、URL 和 service_role key。
-- `/角色列表` 看不到舊角色：新版刻意使用獨立 `bot_characters` 資料表，不會繼承舊版預設角色。
-
-
-## v2：個性列表與固定 Prompt
-
-- `/建立角色`：先從 8 種個性下拉選單選擇，再填入角色名稱、背景、說話風格。圖片可在指令中上傳。
-- `/角色設定`：可重新選擇個性、修改角色資訊或更換圖片。
-- 核心 `SYSTEM_PROMPT` 寫在 `bot.py`，聊天時即時組合角色資料，不再依賴舊的資料庫 Prompt。
-- 舊角色仍可使用；若個性欄位是舊版自由文字，仍可聊天，重新設定後會改用列表值。
-- 其餘 9 個指令、資料表、Docker/Render 部署方式保留。
-- Discord 的個性選單有效期限為 3 分鐘，過期後重新執行指令即可。
-
-
-## v3：刪除角色
-
-`/刪除角色`：選擇角色後按「確認刪除」。只有角色建立者或伺服器管理員能刪除；會同步清除角色資料、聊天記憶、養成進度與 Storage 圖片。使用者背包和簽到紀錄不受影響。每次最多顯示 25 個可刪除角色。
-
-## v4 好感度判斷
-
-`/聊天` 會額外呼叫一次 Gemini，依角色個性、背景和本次對話判斷好感度變化（-5 至 +5）。普通聊天預設 0，判斷失敗也維持 0。每位使用者對每個角色每 60 秒最多結算一次，好感度限制在 0～100；經驗值維持原本 +8 的規則。Discord 回覆下方會顯示本次實際結算的變化；冷卻期間不顯示變化。送禮數值不變。此功能會增加 Gemini API 使用量。
+- 圖片會存到 Public Storage，請勿上傳私密圖片。角色圖片的 `set_image` 會受 Discord 顯示尺寸影響；Discord Embed 無法將圖片排在同一張資訊卡的標題上方，因此本版以**圖片訊息在前、資訊卡在後**實現順序。
+- 不同安裝方式的 Guild/User Install 在 guild 內仍沿用原始 `scope_of` 實作，未實現完整的兩種安裝隔離。
+- 探索故事是六組可重複的固定事件，並非 AI 即時生成的無限劇情；未來可在 `game.py` 增加事件庫。

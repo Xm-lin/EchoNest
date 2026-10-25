@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from database import connect
+from game import EVENTS, QUESTS, relationship, progress, start_event, finish_event, week, today
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +27,9 @@ TOKEN = os.environ['DISCORD_TOKEN']
 AI_KEY = os.environ['GEMINI_API_KEY']
 MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
 SUPABASE_URL = os.environ['SUPABASE_URL'].rstrip('/')
+if SUPABASE_URL.endswith('/rest/v1'):
+    SUPABASE_URL = SUPABASE_URL[:-8]
+    log.warning('SUPABASE_URL contained /rest/v1; normalized to project root')
 STORAGE_KEY = os.environ['SUPABASE_SERVICE_ROLE_KEY']
 BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', 'characters')
 ITEMS = {'糖果': 8, '花束': 15, '飲料': 5, '禮物盒': 20}
@@ -131,11 +135,7 @@ async def upload_image(attachment, scope):
     mime = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'webp': 'image/webp'}.get(ext)
     if mime is None or (attachment.content_type and attachment.content_type != mime):
         raise ValueError('只支援 PNG、JPG、WEBP 圖片。')
-    try:
-        data = await attachment.read()
-    except Exception:
-        log.exception("Discord attachment download failed")
-        raise
+    data = await attachment.read()
     if len(data) > 5 * 1024 * 1024:
         raise ValueError('圖片不能超過 5 MB。')
     signatures = {'png': data.startswith(b'\x89PNG\r\n\x1a\n'),
@@ -151,7 +151,9 @@ async def upload_image(attachment, scope):
                                      headers={'Authorization': f'Bearer {STORAGE_KEY}',
                                               'apikey': STORAGE_KEY, 'Content-Type': mime,
                                               'x-upsert': 'false'})
-        response.raise_for_status()
+        if response.is_error:
+            log.error('Storage upload failed: HTTP %s; body=%s', response.status_code, response.text[:400])
+            raise RuntimeError(f'圖片上傳失敗（Storage HTTP {response.status_code}）')
     return path
 
 
@@ -328,30 +330,22 @@ async def character_status(interaction: discord.Interaction):
     p = await guarded(interaction, lambda: get_profile(scope, uid, c['id']))
     if p is None:
         return
-    embed = discord.Embed(
-        title=c['name'],
-        description=(
-            f'心情：{c["mood"]}\n'
-            f'好感度：{hearts(p["affection"])}'
-        ),
-        color=discord.Color.blurple()
-    )
-
-    embed.add_field(
-        name='等級',
-        value=f'Lv.{level(p["exp"])}',
-        inline=True
-    )
-
-    embed.add_field(
-        name='EXP',
-        value=f'{p["exp"] % 100}/100',
-        inline=True
-    )
-
     url = image_url(c['image_path'])
     if url:
-        embed.set_image(url=url)
+        # A separate image-only embed guarantees the portrait is above the stats.
+        picture = discord.Embed(color=discord.Color.blurple())
+        picture.set_image(url=url)
+        await interaction.followup.send(embed=picture, ephemeral=True)
+    embed = discord.Embed(
+        title=f'✦ {c["name"]}',
+        description=f'**{relationship(p["affection"])}** · {c["personality"]}\n'
+                    f'心情：{c["mood"]}\n好感度：{hearts(p["affection"])}  {p["affection"]}/100',
+        color=discord.Color.blurple())
+    embed.add_field(name='等級', value=f'Lv.{level(p["exp"])}', inline=True)
+    embed.add_field(name='EXP', value=f'{p["exp"] % 100}/100', inline=True)
+    bars = (p['exp'] % 100) // 10
+    embed.add_field(name='成長進度', value='▰' * bars + '▱' * (10 - bars), inline=False)
+    embed.set_footer(text='使用 /探索 體驗事件 · /任務 查看本週目標 · /收藏 查看回憶')
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -565,6 +559,7 @@ async def gift(interaction: discord.Interaction, 道具: app_commands.Choice[str
                     VALUES(%s,%s,%s,%s) ON CONFLICT(scope,user_id,character_id)
                     DO UPDATE SET affection=LEAST(100,bot_profiles.affection+EXCLUDED.affection)''',
                     (scope, uid, c['id'], ITEMS[道具.value]))
+                progress(conn, scope, uid, c['id'], 'gift')
             return changed
     changed = await guarded(interaction, work)
     if changed is not None:
@@ -670,6 +665,8 @@ async def chat(interaction: discord.Interaction, 內容: str):
                     WHERE scope=%s AND user_id=%s AND character_id=%s
                     AND (last_reward_at IS NULL OR last_reward_at<NOW()-INTERVAL '60 seconds')''',
                     (affection_delta, scope, uid, cid)).rowcount
+                if changed:
+                    progress(conn, scope, uid, cid, 'chat')
                 return affection_delta if changed else None
         applied_delta = await asyncio.to_thread(save)
         embed = discord.Embed(description=reply[:3900], color=discord.Color.blurple())
@@ -682,6 +679,101 @@ async def chat(interaction: discord.Interaction, 內容: str):
     except Exception:
         log.exception('Chat failed')
         await interaction.followup.send('聊天失敗，請檢查 Gemini 或 Supabase 設定及 Render Logs。', ephemeral=True)
+
+
+class StoryView(discord.ui.View):
+    def __init__(self, owner, scope, cid, event_id, event):
+        super().__init__(timeout=1200)
+        self.owner, self.scope, self.cid, self.event_id = owner, scope, cid, event_id
+        for i, choice in enumerate(event['choices']):
+            button = discord.ui.Button(label=choice[0][:80], style=discord.ButtonStyle.secondary, row=i)
+            async def select(interaction, selected=i):
+                if interaction.user.id != self.owner:
+                    return await interaction.response.send_message('只有發起探索的人能選擇。', ephemeral=True)
+                await interaction.response.defer(ephemeral=True)
+                try:
+                    result = await asyncio.to_thread(finish_event, db, self.scope, str(self.owner), self.cid, self.event_id, selected)
+                    if not result:
+                        return await interaction.followup.send('這次事件已結束或逾時，請重新使用 /探索。', ephemeral=True)
+                    for item in self.children:
+                        item.disabled = True
+                    text = (f'📖 **{result["ending"]}**\n'
+                            f'好感度 +{result["delta"]} · EXP +{result["xp"]}\n'
+                            f'🎖️ 收藏解鎖：**{result["souvenir"]}**')
+                    if result['rewards']:
+                        text += '\n'+'\n'.join(result['rewards'])
+                    await interaction.edit_original_response(content=text, embed=None, view=self)
+                except Exception:
+                    log.exception('Story choice failed')
+                    await interaction.followup.send('事件處理失敗，請查看 Render Logs。', ephemeral=True)
+            button.callback = select
+            self.add_item(button)
+
+
+@bot.tree.command(name='探索', description='觸發隨機角色故事，選擇行動並收藏回憶')
+@command
+async def explore(interaction: discord.Interaction):
+    c = await get_active_or_warn(interaction)
+    if not c:
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    scope, uid = scope_of(interaction), str(interaction.user.id)
+    try:
+        result = await asyncio.to_thread(start_event, db, scope, uid, c['id'], c['name'])
+        if not result:
+            return await interaction.followup.send('今天的 3 次探索已完成，明天再來看看新故事吧。', ephemeral=True)
+        event = result['event']
+        embed = discord.Embed(title='✦ '+event['title'], description=event['story'].format(name=c['name']), color=discord.Color.purple())
+        embed.set_footer(text='選擇一個行動 · 事件選項保留 20 分鐘 · 台灣時間每日最多完成 3 次')
+        await interaction.followup.send(embed=embed,
+            view=StoryView(interaction.user.id, scope, c['id'], result['id'], event), ephemeral=True)
+    except Exception:
+        log.exception('Explore failed')
+        await interaction.followup.send('探索失敗，請查看 Render Logs。', ephemeral=True)
+
+
+@bot.tree.command(name='任務', description='查看每週任務、獎勵與完成進度')
+@command
+async def quests(interaction: discord.Interaction):
+    c = await get_active_or_warn(interaction)
+    if not c:
+        return
+    scope, uid = scope_of(interaction), str(interaction.user.id)
+    def work():
+        rows = db.all("""SELECT action,count FROM bot_quest_progress
+            WHERE scope=%s AND user_id=%s AND character_id=%s AND week=%s""", (scope,uid,c['id'],week()))
+        return {r['action']:r['count'] for r in rows}
+    data = await guarded(interaction, work)
+    if data is None:
+        return
+    embed = discord.Embed(title='📜 本週任務', description='完成任務自動領取：EXP +35、禮物盒 ×1\n每週一（台灣時間）重置，無連續登入要求。',color=discord.Color.blurple())
+    for action,(name,limit) in QUESTS.items():
+        count = min(data.get(action,0),limit)
+        embed.add_field(name=('✅ ' if count>=limit else '◻️ ')+name,value=f'{count}/{limit}',inline=False)
+    await interaction.followup.send(embed=embed,ephemeral=True)
+
+
+@bot.tree.command(name='收藏', description='查看角色專屬紀念品與故事回憶')
+@command
+async def collection(interaction: discord.Interaction):
+    c = await get_active_or_warn(interaction)
+    if not c:
+        return
+    scope, uid = scope_of(interaction), str(interaction.user.id)
+    def work():
+        items = db.all("""SELECT item FROM bot_collectibles WHERE scope=%s AND user_id=%s AND character_id=%s
+            ORDER BY obtained_at DESC LIMIT 30""",(scope,uid,c['id']))
+        stories = db.all("""SELECT event_title,choice FROM bot_story_history
+            WHERE scope=%s AND user_id=%s AND character_id=%s ORDER BY id DESC LIMIT 5""",(scope,uid,c['id']))
+        return items,stories
+    result = await guarded(interaction, work)
+    if result is None:
+        return
+    items,stories=result
+    embed = discord.Embed(title=f'✦ {c["name"]} 的收藏冊',color=discord.Color.gold())
+    embed.add_field(name=f'紀念品（{len(items)} 件）',value=' · '.join(r['item'] for r in items)[:950] if items else '尚無紀念品，使用 /探索 解鎖。',inline=False)
+    embed.add_field(name='最近的故事',value='\n'.join(f'• {r["event_title"]} — {r["choice"]}' for r in stories) if stories else '還沒有共同故事。',inline=False)
+    await interaction.followup.send(embed=embed,ephemeral=True)
 
 
 @bot.event

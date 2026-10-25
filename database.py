@@ -46,6 +46,33 @@ CREATE TABLE IF NOT EXISTS bot_memories (
  summary TEXT NOT NULL DEFAULT '', last_id BIGINT NOT NULL DEFAULT 0,
  PRIMARY KEY(scope,user_id,character_id)
 );
+CREATE TABLE IF NOT EXISTS bot_collectibles (
+ scope TEXT NOT NULL, user_id TEXT NOT NULL, character_id BIGINT NOT NULL REFERENCES bot_characters(id) ON DELETE CASCADE,
+ item TEXT NOT NULL, obtained_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(scope,user_id,character_id,item)
+);
+CREATE TABLE IF NOT EXISTS bot_story_pending (
+ id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ scope TEXT NOT NULL, user_id TEXT NOT NULL, character_id BIGINT NOT NULL REFERENCES bot_characters(id) ON DELETE CASCADE,
+ event_index INTEGER NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+ UNIQUE(scope,user_id,character_id)
+);
+CREATE TABLE IF NOT EXISTS bot_story_history (
+ id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ scope TEXT NOT NULL, user_id TEXT NOT NULL, character_id BIGINT NOT NULL REFERENCES bot_characters(id) ON DELETE CASCADE,
+ day TEXT NOT NULL, event_title TEXT NOT NULL, choice TEXT NOT NULL, ending TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bot_story_daily_idx ON bot_story_history(scope,user_id,character_id,day);
+CREATE TABLE IF NOT EXISTS bot_quest_progress (
+ scope TEXT NOT NULL, user_id TEXT NOT NULL, character_id BIGINT NOT NULL REFERENCES bot_characters(id) ON DELETE CASCADE,
+ week TEXT NOT NULL, action TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(scope,user_id,character_id,week,action)
+);
+CREATE TABLE IF NOT EXISTS bot_quest_rewards (
+ scope TEXT NOT NULL, user_id TEXT NOT NULL, character_id BIGINT NOT NULL REFERENCES bot_characters(id) ON DELETE CASCADE,
+ week TEXT NOT NULL, action TEXT NOT NULL,
+ PRIMARY KEY(scope,user_id,character_id,week,action)
+);
 '''
 
 class Database:
@@ -56,9 +83,10 @@ class Database:
     def open(self):
         self.pool.open(wait=True, timeout=30)
         with self.pool.connection() as conn:
-            for sql in SCHEMA.split(';'):
-                if sql.strip():
-                    conn.execute(sql)
+            with conn.transaction():
+                for sql in SCHEMA.split(';'):
+                    if sql.strip():
+                        conn.execute(sql)
 
     def one(self, sql, args=()):
         with self.pool.connection() as conn:
