@@ -138,16 +138,42 @@ async def chat(interaction: discord.Interaction, 內容: str):
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def status(interaction: discord.Interaction):
-    scope, uid = scope_of(interaction), str(interaction.user.id)
-    ensure(scope, uid)
-    c, p = character(scope), profile(scope, uid)
-    embed = discord.Embed(title=c["name"], description=f"心情：{c['mood']}\n好感度：{hearts(p['affection'])}")
-    embed.add_field(name="等級", value=f"Lv.{level(p['exp'])}")
-    embed.add_field(name="EXP", value=f"{p['exp'] % 100}/100")
-    if c["image_url"]:
-        embed.set_thumbnail(url=c["image_url"])
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
 
+    try:
+        scope = scope_of(interaction)
+        uid = str(interaction.user.id)
+
+        def get_data():
+            ensure(scope, uid)
+            return character(scope), profile(scope, uid)
+
+        c, p = await asyncio.to_thread(get_data)
+
+        embed = discord.Embed(
+            title=c["name"],
+            description=(
+                f"心情：{c['mood']}\n"
+                f"好感度：{hearts(p['affection'])}"
+            )
+        )
+
+        embed.add_field(name="等級", value=f"Lv.{level(p['exp'])}")
+        embed.add_field(name="EXP", value=f"{p['exp'] % 100}/100")
+
+        if c["image_url"]:
+            embed.set_thumbnail(url=c["image_url"])
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+        await interaction.followup.send(
+            "讀取狀態失敗，請查看 Render Logs。",
+            ephemeral=True
+        )
 
 role_group = app_commands.Group(name="角色", description="角色設定與資訊")
 app_commands.allowed_installs(guilds=True, users=True)(role_group)
