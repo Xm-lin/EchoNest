@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from database import connect
+from character_card import render_character_card
 from game import EVENTS, QUESTS, relationship, progress, start_event, finish_event, week, today
 
 load_dotenv()
@@ -330,23 +331,23 @@ async def character_status(interaction: discord.Interaction):
     p = await guarded(interaction, lambda: get_profile(scope, uid, c['id']))
     if p is None:
         return
+    portrait = None
     url = image_url(c['image_path'])
     if url:
-        # A separate image-only embed guarantees the portrait is above the stats.
-        picture = discord.Embed(color=discord.Color.blurple())
-        picture.set_image(url=url)
-        await interaction.followup.send(embed=picture, ephemeral=True)
-    embed = discord.Embed(
-        title=f'✦ {c["name"]}',
-        description=f'**{relationship(p["affection"])}** · {c["personality"]}\n'
-                    f'心情：{c["mood"]}\n好感度：{hearts(p["affection"])}  {p["affection"]}/100',
-        color=discord.Color.blurple())
-    embed.add_field(name='等級', value=f'Lv.{level(p["exp"])}', inline=True)
-    embed.add_field(name='EXP', value=f'{p["exp"] % 100}/100', inline=True)
-    bars = (p['exp'] % 100) // 10
-    embed.add_field(name='成長進度', value='▰' * bars + '▱' * (10 - bars), inline=False)
-    embed.set_footer(text='使用 /探索 體驗事件 · /任務 查看本週目標 · /收藏 查看回憶')
-    await interaction.followup.send(embed=embed, ephemeral=True)
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                if len(response.content) <= 8 * 1024 * 1024 and response.headers.get('content-type', '').startswith('image/'):
+                    portrait = response.content
+        except (httpx.HTTPError, ValueError):
+            log.warning('Character portrait unavailable for card: id=%s', c['id'])
+    try:
+        card = await asyncio.to_thread(render_character_card, c, p, portrait, relationship(p['affection']))
+        await interaction.followup.send(file=discord.File(card, filename='echonest-character.png'), ephemeral=True)
+    except Exception:
+        log.exception('Character card render failed')
+        await interaction.followup.send('角色卡生成失敗，請查看 Render Logs。', ephemeral=True)
 
 
 @bot.tree.command(name='角色設定', description='修改目前角色（可上傳新圖片）')

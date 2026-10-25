@@ -48,6 +48,10 @@ python -m compileall -q bot.py database.py game.py
 
 ## 注意事項
 
-- 圖片會存到 Public Storage，請勿上傳私密圖片。角色圖片的 `set_image` 會受 Discord 顯示尺寸影響；Discord Embed 無法將圖片排在同一張資訊卡的標題上方，因此本版以**圖片訊息在前、資訊卡在後**實現順序。
+- 圖片會存到 Public Storage，請勿上傳私密圖片。`/角色狀態` 會以 Pillow 即時合成一張 900×1250 PNG：上方角色大圖，下方名稱、關係階段、心情、等級、好感度及經驗值進度條。無圖片時顯示預設背景，不需要任何圖片生成 API。Docker 會安裝 Noto CJK 字型以正確顯示繁體中文。
 - 不同安裝方式的 Guild/User Install 在 guild 內仍沿用原始 `scope_of` 實作，未實現完整的兩種安裝隔離。
 - 探索故事是六組可重複的固定事件，並非 AI 即時生成的無限劇情；未來可在 `game.py` 增加事件庫。
+
+## 角色狀態圖片卡
+
+`character_card.py` 使用 Pillow 將 Supabase Storage 的角色圖片與 PostgreSQL 數值合成 PNG，直接傳到 Discord，不需 Gemini 圖片 API，也不需新增資料表。圖片下載失敗時改用預設背景。若修改 Dockerfile，需重新部署以安裝中文字型。
