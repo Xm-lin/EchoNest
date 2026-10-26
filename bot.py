@@ -339,6 +339,7 @@ def command(func):
     return app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(func)
 
 
+
 IMAGE_STYLES = {
     '精緻日系': 'high-end Japanese anime illustration, detailed flowing hair strands, expressive eyes, delicate painterly shading, natural intimate composition, muted lavender and warm gray tones, soft cinematic window lighting, atmospheric slice-of-life setting, tasteful professional anime key visual',
     '柔和插畫': 'soft pastel illustration, warm diffused daylight, delicate brushwork, muted colors, cozy peaceful atmosphere, gentle hand-painted textures',
@@ -350,9 +351,10 @@ IMAGE_STYLES = {
 
 
 def build_character_image_prompt(character, description, style_name, scene):
-    """Use a fixed art direction while respecting the player's own character description."""
+    """Generate a chest-up character portrait in the selected art style."""
     visual = IMAGE_STYLES[style_name]
     scene = (scene or '在舒適的室內，自然地望向鏡頭').strip()[:300]
+
     return (
         'Create ONE original fictional character illustration.\n'
         f'Art direction: {visual}.\n'
@@ -361,11 +363,24 @@ def build_character_image_prompt(character, description, style_name, scene):
         f'Character background (for context): {character["background"][:240]}.\n'
         f'Character appearance and outfit: {description[:750]}.\n'
         f'Pose and setting: {scene}.\n'
-        'One character only. Preserve the specified physical features, hair, outfit and accessories. '
+
+        'COMPOSITION REQUIREMENTS: '
+        'Chest-up portrait only, showing the character from the upper chest to the top of the head. '
+        'Medium close-up framing, upper body centered in the image. '
+        'Head, hair, face, shoulders and upper chest clearly visible. '
+        'Keep the entire head inside the frame with comfortable space above the hair. '
+        'Face should be the main focal point. '
+        'Natural pose, eye-level camera angle, balanced composition. '
+        'Do not generate full-body, knee-up, waist-up, or distant shots. '
+        'Do not crop the forehead, hair, chin, or face. '
+
+        'One character only. '
+        'Preserve the specified physical features, hair, outfit and accessories. '
         'Beautiful intentional composition with the character face clearly visible. '
         'No captions, typography, watermarks, UI, photo collage, frames, or logos. '
         'Do not imitate any named living artist or copyrighted character.'
     )
+
 
 
 class ImageStyleSelect(discord.ui.Select):
