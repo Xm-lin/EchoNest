@@ -302,36 +302,7 @@ class GeneratedImageView(discord.ui.View):
         await interaction.response.edit_message(content='已取消，角色圖片沒有變更。', attachments=[], view=self)
 
 
-@bot.tree.command(name='生成角色圖片', description='透過外部圖片 API 生成並預覽角色圖片')
-@command
-@app_commands.describe(描述='角色的外觀、服裝與畫風')
-async def image_generate(interaction: discord.Interaction, 描述: str):
-    c = await get_active_or_warn(interaction)
-    if not c:
-        return
-    if c['created_by'] != str(interaction.user.id) and not may_edit(interaction):
-        return await send_error(interaction, '只有角色建立者或伺服器管理員能更換圖片。')
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    try:
-        prompt = f'單人虛構角色立繪，角色名稱：{c["name"]}。背景設定：{c["background"][:300]}。外觀要求：{描述[:900]}。不要文字、浮水印或介面。'
-        data = await generate_character_image(prompt)
-        # Validate the actual bytes before showing a preview.
-        if not data or len(data) > 5 * 1024 * 1024:
-            raise ValueError('生成圖片超過 5 MB 或內容為空。')
-        if data.startswith(b'\x89PNG\r\n\x1a\n'):
-            ext = 'png'
-        elif data.startswith(b'\xff\xd8\xff'):
-            ext = 'jpg'
-        elif data.startswith(b'RIFF') and data[8:12] == b'WEBP':
-            ext = 'webp'
-        else:
-            raise ValueError('不支援的圖片格式。')
-        await interaction.followup.send('預覽圖片：確認後才會替換角色原圖（5 分鐘內有效）。',
-            file=discord.File(io.BytesIO(data), filename=f'preview.{ext}'),
-            view=GeneratedImageView(interaction.user.id, scope_of(interaction), c['id'], data), ephemeral=True)
-    except Exception:
-        log.exception('Image generation failed')
-        await interaction.followup.send('圖片生成失敗。請確認圖片 API 設定、額度和回應格式，並查看 Render Logs。', ephemeral=True)
+
 
 
 async def send_error(interaction, message):
@@ -367,6 +338,37 @@ def command(func):
     func = app_commands.allowed_installs(guilds=True, users=True)(func)
     return app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(func)
 
+
+@bot.tree.command(name='生成角色圖片', description='透過外部圖片 API 生成並預覽角色圖片')
+@command
+@app_commands.describe(描述='角色的外觀、服裝與畫風')
+async def image_generate(interaction: discord.Interaction, 描述: str):
+    c = await get_active_or_warn(interaction)
+    if not c:
+        return
+    if c['created_by'] != str(interaction.user.id) and not may_edit(interaction):
+        return await send_error(interaction, '只有角色建立者或伺服器管理員能更換圖片。')
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        prompt = f'單人虛構角色立繪，角色名稱：{c["name"]}。背景設定：{c["background"][:300]}。外觀要求：{描述[:900]}。不要文字、浮水印或介面。'
+        data = await generate_character_image(prompt)
+        # Validate the actual bytes before showing a preview.
+        if not data or len(data) > 5 * 1024 * 1024:
+            raise ValueError('生成圖片超過 5 MB 或內容為空。')
+        if data.startswith(b'\x89PNG\r\n\x1a\n'):
+            ext = 'png'
+        elif data.startswith(b'\xff\xd8\xff'):
+            ext = 'jpg'
+        elif data.startswith(b'RIFF') and data[8:12] == b'WEBP':
+            ext = 'webp'
+        else:
+            raise ValueError('不支援的圖片格式。')
+        await interaction.followup.send('預覽圖片：確認後才會替換角色原圖（5 分鐘內有效）。',
+            file=discord.File(io.BytesIO(data), filename=f'preview.{ext}'),
+            view=GeneratedImageView(interaction.user.id, scope_of(interaction), c['id'], data), ephemeral=True)
+    except Exception:
+        log.exception('Image generation failed')
+        await interaction.followup.send('圖片生成失敗。請確認圖片 API 設定、額度和回應格式，並查看 Render Logs。', ephemeral=True)
 
 class CharacterModal(discord.ui.Modal):
     name = discord.ui.TextInput(label='角色名稱', max_length=40)
