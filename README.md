@@ -158,3 +158,33 @@ python -m compileall -q bot.py database.py game.py
 - `character_card.py` 將 Supabase 角色圖片、名稱、關係、心情、個性、等級、EXP、好感度填到固定位置。
 - 可以用外部繪圖工具或 AI 製作**空白底板**，但需維持 900 × 1340 並保留角色圖與文字區域；正式生成不依賴 AI API。
 - `assets/character_card_base.png` 可自行替換。角色圖片仍從玩家上傳的 Supabase Storage 取得。
+
+
+## v10：個別指令可見性與圖片確認修正
+
+- `/聊天設定`：下拉選擇 14 個指令之一，按「僅自己可見」或「公開」；每位使用者獨立儲存至 `bot_reply_settings`。預設私人；DM 永遠私人。
+- `/聊天` 私人模式不發送公開 Webhook；公開模式保留角色名稱與頭像 Webhook，無權限時退回 Embed。
+- 部分建立、修改、刪除與送禮的二次確認、錯誤訊息仍以私人回覆保障操作安全。
+- 生圖畫風改名為「動畫原畫、奶油色日常、戀愛遊戲 CG、復古像素、紙上水彩、小小一隻」，構圖為胸部以上、動作與鏡頭更自然。
+- 生圖大於 5 MB 時嘗試轉 JPEG 壓縮；Supabase Storage 上傳錯誤會記錄 HTTP 狀態與回應本文。
+- 圖片資料庫更新成功後，若 Discord 按鈕訊息編輯失敗，不再誤報圖片沒有變更。
+- `bot_reply_settings` 會在機器人啟動時自動建立，不需手動跑 SQL。
+
+注意：若 Storage 回傳 401/403，檢查 Render 的 `SUPABASE_SERVICE_ROLE_KEY` 是否為真正的 service role 金鑰；若回傳 404，確認 `SUPABASE_URL` 與 bucket `characters`。切勿把 service role key 貼到公開頻道。
+
+
+## v11：角色主動互動（不定時吵人）
+
+- 進入 `/角色設定` → **主動互動設定**。每位使用者可針對每個角色獨立設定。
+- 預設關閉。可選偶爾（每週約 2–3 次）、普通（每天約 1–2 次）、話很多（每天約 3–4 次）；這些是大致頻率，不保證固定次數。
+- 可設定允許時段（台灣時間，整點）及 Discord 私訊／目前伺服器頻道。私訊需使用者允許機器人傳訊；若無法傳送，該角色的主動互動會停用。
+- 角色主動訊息依角色性格、心情、近期聊天生成，會從資料庫讀取最新角色圖片；不會因為沒回覆而催促。
+- 使用 Supabase PostgreSQL `bot_proactive_settings` 儲存設定及下一次排程；啟動時自動建立資料表。部署環境須允許資料庫建表。
+- Render 免費服務休眠時不會持續排程；需保持 Bot 持續運行。
+- 更換角色圖片會使用新的 Storage 路徑，後續聊天 Webhook、角色狀態卡及主動訊息會重新讀取最新圖片。已送出的 Discord 歷史訊息不會自動改圖。
+- 保留原本 15 個 Slash Commands，不新增指令；所有原有功能仍在。
+- `PERSONALITIES` 依指定的八種名稱與描述保留；聊天仍遵循 Gemini 模型的安全規則。
+
+### 測試限制
+
+已完成 Python 編譯及專案靜態測試。**尚未在實際 Discord／Supabase／Render 環境測試排程、私訊權限及圖片同步。**

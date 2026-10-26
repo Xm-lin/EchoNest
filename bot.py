@@ -2,6 +2,7 @@
 import asyncio
 import json
 import io
+from PIL import Image
 import base64
 import logging
 import os
@@ -9,6 +10,7 @@ import random
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote
 
@@ -123,6 +125,78 @@ def get_profile(scope, uid, cid):
                   (scope, uid, cid))
 
 
+VISIBILITY_COMMANDS = (
+    '聊天', '角色狀態', '角色列表', '切換角色', '角色設定', '建立角色',
+    '刪除角色', '背包', '簽到', '送禮', '探索', '任務', '收藏', '生成角色圖片',
+)
+
+async def private_reply(interaction, command_name=None):
+    if interaction.guild_id is None:
+        return True  # DMs cannot have public interaction responses.
+    name = command_name or (interaction.command.name if interaction.command else None)
+    if not name or name not in VISIBILITY_COMMANDS:
+        return True
+    try:
+        row = await asyncio.to_thread(db.one,
+            'SELECT private FROM bot_reply_settings WHERE user_id=%s AND command_name=%s',
+            (str(interaction.user.id), name))
+        return bool(row['private']) if row else True
+    except Exception:
+        log.exception('Could not load reply visibility; using private mode')
+        return True
+
+
+class VisibilitySelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(placeholder='選擇要調整的指令', options=[
+            discord.SelectOption(label=f'/{name}', value=name) for name in VISIBILITY_COMMANDS
+        ])
+
+    async def callback(self, interaction):
+        view = self.view
+        if interaction.user.id != view.owner_id:
+            return await interaction.response.send_message('這不是你的設定選單。', ephemeral=True)
+        view.selected = self.values[0]
+        current = await private_reply(interaction, view.selected)
+        await interaction.response.edit_message(
+            content=f'**/{view.selected}**\n目前：{"僅自己可見" if current else "公開"}\n請選擇新的可見範圍。',
+            view=view)
+
+
+class VisibilityView(discord.ui.View):
+    def __init__(self, owner_id):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.selected = None
+        self.add_item(VisibilitySelect())
+
+    async def set_visibility(self, interaction, private):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message('這不是你的設定選單。', ephemeral=True)
+        if self.selected is None:
+            return await interaction.response.send_message('請先選擇指令。', ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await asyncio.to_thread(db.run, """INSERT INTO bot_reply_settings(user_id,command_name,private)
+                VALUES(%s,%s,%s) ON CONFLICT(user_id,command_name)
+                DO UPDATE SET private=EXCLUDED.private""",
+                (str(interaction.user.id), self.selected, private))
+            await interaction.followup.send(
+                f'已將 **/{self.selected}** 設為 **{"僅自己可見" if private else "公開"}**。', ephemeral=True)
+            await interaction.message.edit(content=f'**/{self.selected}**\n目前：{"僅自己可見" if private else "公開"}\n可繼續選擇其他指令。', view=self)
+        except Exception:
+            log.exception('Failed to save reply setting')
+            await interaction.followup.send('設定儲存失敗，請查看 Render Logs。', ephemeral=True)
+
+    @discord.ui.button(label='僅自己可見', style=discord.ButtonStyle.primary, emoji='🔒')
+    async def private_button(self, interaction, button):
+        await self.set_visibility(interaction, True)
+
+    @discord.ui.button(label='公開', style=discord.ButtonStyle.secondary, emoji='🌐')
+    async def public_button(self, interaction, button):
+        await self.set_visibility(interaction, False)
+
+
 def image_url(path):
     if not path:
         return None
@@ -160,10 +234,26 @@ async def upload_image(attachment, scope):
     return path
 
 
+def optimize_generated_image(data: bytes) -> bytes:
+    """Convert oversized image to high-quality JPEG, keeping Storage under 5 MB."""
+    if len(data) <= 5 * 1024 * 1024:
+        return data
+    with Image.open(io.BytesIO(data)) as image:
+        image = image.convert('RGB')
+        image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+        for quality in (90, 82, 72):
+            output = io.BytesIO()
+            image.save(output, format='JPEG', quality=quality, optimize=True)
+            if output.tell() <= 5 * 1024 * 1024:
+                return output.getvalue()
+    raise ValueError('圖片壓縮後仍超過 5 MB。')
+
+
 async def upload_image_bytes(data: bytes, scope: str) -> str:
     """Store validated PNG/JPEG/WEBP output in the existing public character bucket."""
-    if not data or len(data) > 5 * 1024 * 1024:
-        raise ValueError('圖片不可為空且不能超過 5 MB。')
+    if not data:
+        raise ValueError('圖片不可為空。')
+    data = optimize_generated_image(data)
     if data.startswith(b'\x89PNG\r\n\x1a\n'):
         ext, mime = 'png', 'image/png'
     elif data.startswith(b'\xff\xd8\xff'):
@@ -178,7 +268,9 @@ async def upload_image_bytes(data: bytes, scope: str) -> str:
         response = await client.post(endpoint, content=data, headers={
             'Authorization': f'Bearer {STORAGE_KEY}', 'apikey': STORAGE_KEY,
             'Content-Type': mime, 'x-upsert': 'false'})
-        response.raise_for_status()
+        if response.is_error:
+            log.error('Generated image Storage upload failed: HTTP %s; body=%s', response.status_code, response.text[:800])
+            raise RuntimeError(f'Supabase Storage HTTP {response.status_code}: {response.text[:180]}')
     return path
 
 
@@ -262,6 +354,7 @@ class GeneratedImageView(discord.ui.View):
                 return await interaction.response.send_message('這張圖片已經處理過了。', ephemeral=True)
             await interaction.response.defer(ephemeral=True)
             new_path = None
+            saved_to_db = False
             try:
                 new_path = await upload_image_bytes(self.image_bytes, self.scope)
                 def save():
@@ -278,19 +371,26 @@ class GeneratedImageView(discord.ui.View):
                     await remove_character_image(new_path)
                     return await interaction.followup.send('角色已不存在或你沒有權限修改。', ephemeral=True)
                 old_path = saved[1]
+                saved_to_db = True
                 self.image_bytes = None
                 for child in self.children:
                     child.disabled = True
-                await interaction.message.edit(view=self)
+                try:
+                    await interaction.message.edit(view=self)
+                except discord.HTTPException:
+                    log.warning('Could not disable image confirmation buttons', exc_info=True)
                 await interaction.followup.send('角色圖片已更新！角色卡和後續 Webhook 聊天頭像會使用新圖。', ephemeral=True)
                 if old_path and old_path != new_path:
                     try:
                         await remove_character_image(old_path)
                     except Exception:
                         log.warning('Could not remove previous image', exc_info=True)
-            except Exception:
-                log.exception('Could not save generated image')
-                await interaction.followup.send('圖片儲存失敗，原本角色圖片未變更。', ephemeral=True)
+            except Exception as exc:
+                log.exception('Could not save generated image; storage path=%s; saved_to_db=%s', new_path, saved_to_db)
+                if saved_to_db:
+                    await interaction.followup.send('角色圖片已儲存，但 Discord 確認訊息更新失敗。請用 /角色狀態 查看。', ephemeral=True)
+                else:
+                    await interaction.followup.send(f'圖片儲存失敗，原圖保留。錯誤：{str(exc)[:220]}', ephemeral=True)
 
     @discord.ui.button(label='取消', style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -314,7 +414,7 @@ async def send_error(interaction, message):
 
 async def guarded(interaction, work):
     """Acknowledge quickly; DB work happens off the Discord event loop."""
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(ephemeral=await private_reply(interaction), thinking=True)
     try:
         return await asyncio.to_thread(work)
     except Exception:
@@ -329,9 +429,11 @@ class EchoBot(commands.Bot):
         db = await asyncio.to_thread(connect)
         commands_synced = await self.tree.sync()
         log.info('Synced %d global slash commands', len(commands_synced))
+        self.proactive_task = asyncio.create_task(proactive_worker())
 
 
 bot = EchoBot(command_prefix='!', intents=discord.Intents.default())
+
 
 
 def command(func):
@@ -339,22 +441,28 @@ def command(func):
     return app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(func)
 
 
+@bot.tree.command(name='聊天設定', description='分別設定各個指令的回覆是否僅自己可見')
+@command
+async def chat_settings(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        '選擇要調整的指令。預設皆為僅自己可見；私訊中的回覆永遠只有自己看得到。',
+        view=VisibilityView(interaction.user.id), ephemeral=True)
+
+
 
 IMAGE_STYLES = {
-    '精緻日系': 'high-end Japanese anime illustration, detailed flowing hair strands, expressive eyes, delicate painterly shading, natural intimate composition, muted lavender and warm gray tones, soft cinematic window lighting, atmospheric slice-of-life setting, tasteful professional anime key visual',
-    '柔和插畫': 'soft pastel illustration, warm diffused daylight, delicate brushwork, muted colors, cozy peaceful atmosphere, gentle hand-painted textures',
-    '視覺小說': 'premium Japanese visual novel CG, carefully rendered anime character, expressive face, detailed environment, cinematic framing, polished 2D game illustration',
-    '像素藝術': 'beautiful handcrafted pixel art, 32-bit inspired sprite illustration, deliberate pixel clusters, charming detailed pixel background, consistent pixel scale',
-    '水彩手繪': 'traditional watercolor anime-inspired illustration, textured paper, transparent pigments, loose expressive brush strokes, elegant subtle colors',
-    'Q版可愛': 'chibi anime illustration, adorable stylized proportions, expressive large eyes, clean colorful illustration, charming playful background',
+    '動畫原畫': 'premium Japanese anime key visual, expressive character design, detailed flowing hair, refined cel shading, vivid eyes, cinematic color grading, atmospheric lighting, rich environmental details',
+    '奶油色日常': 'soft pastel anime illustration, warm creamy colors, gentle hand-painted textures, cozy everyday atmosphere, delicate brushwork, natural sunlight, subtle emotional storytelling',
+    '戀愛遊戲 CG': 'premium Japanese visual novel CG, polished 2D character illustration, expressive facial acting, detailed background, cinematic storytelling, beautiful lighting, carefully rendered clothing and hair',
+    '復古像素': 'handcrafted retro pixel art, consistent pixel scale, expressive pixel character portrait, carefully designed pixel clusters, rich environmental details, nostalgic game aesthetic',
+    '紙上水彩': 'traditional watercolor anime illustration, textured watercolor paper, transparent pigments, expressive brush strokes, delicate color bleeding, soft organic edges, elegant handmade appearance',
+    '小小一隻': 'adorable chibi anime illustration, super-deformed character proportions, large expressive eyes, playful gestures, charming colorful environment, clean polished illustration',
 }
 
 
 def build_character_image_prompt(character, description, style_name, scene):
-    """Generate a chest-up character portrait in the selected art style."""
-    visual = IMAGE_STYLES[style_name]
-    scene = (scene or '在舒適的室內，自然地望向鏡頭').strip()[:300]
-
+    visual = IMAGE_STYLES.get(style_name, IMAGE_STYLES['動畫原畫'])
+    scene = (scene or '自然的日常生活場景').strip()[:300]
     return (
         'Create ONE original fictional character illustration.\n'
         f'Art direction: {visual}.\n'
@@ -363,42 +471,33 @@ def build_character_image_prompt(character, description, style_name, scene):
         f'Character background (for context): {character["background"][:240]}.\n'
         f'Character appearance and outfit: {description[:750]}.\n'
         f'Pose and setting: {scene}.\n'
-
-        'COMPOSITION REQUIREMENTS: '
-        'Chest-up portrait only, showing the character from the upper chest to the top of the head. '
-        'Medium close-up framing, upper body centered in the image. '
-        'Head, hair, face, shoulders and upper chest clearly visible. '
-        'Keep the entire head inside the frame with comfortable space above the hair. '
-        'Face should be the main focal point. '
-        'Natural pose, eye-level camera angle, balanced composition. '
-        'Do not generate full-body, knee-up, waist-up, or distant shots. '
-        'Do not crop the forehead, hair, chin, or face. '
-
-        'One character only. '
-        'Preserve the specified physical features, hair, outfit and accessories. '
-        'Beautiful intentional composition with the character face clearly visible. '
-        'No captions, typography, watermarks, UI, photo collage, frames, or logos. '
-        'Do not imitate any named living artist or copyrighted character.'
+        'Chest-up character illustration, upper chest, shoulders, face and complete head visible. '
+        'Keep the entire hairstyle in frame. Use expressive body language, natural three-quarter angles, '
+        'interesting eye direction, gestures and expressions reflecting the personality and scene. '
+        'Use cinematic framing, environmental storytelling, foreground depth, subtle movement and atmospheric lighting. '
+        'Avoid generic centered portraits, stiff poses, repetitive smiles, empty backgrounds and passport photos. '
+        'Preserve specified physical features, hair, outfit and accessories. '
+        'No full-body or distant composition, cropped head, captions, watermarks, UI, collage, frames or logos. '
+        'Do not imitate named living artists or copyrighted characters.'
     )
-
 
 
 class ImageStyleSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
-            placeholder='選擇圖片畫風（預設：精緻日系）',
+            placeholder='選擇圖片畫風（預設：動畫原畫）',
             min_values=1, max_values=1,
             options=[discord.SelectOption(
                 label=name, value=name,
                 description={
-                    '精緻日系': '細膩髮絲、柔和光影，接近參考圖片',
-                    '柔和插畫': '溫暖、低飽和、手繪質感',
-                    '視覺小說': '精緻日系遊戲 CG',
-                    '像素藝術': '復古像素角色插畫',
-                    '水彩手繪': '水彩筆觸、紙張質感',
-                    'Q版可愛': '可愛比例、活潑表情',
+                    '動畫原畫': '細膩動畫畫面、電影感光影',
+                    '奶油色日常': '暖色柔光、溫馨生活感',
+                    '戀愛遊戲 CG': '精緻劇情插畫、細膩表情',
+                    '復古像素': '經典遊戲像素美術',
+                    '紙上水彩': '紙張肌理、自然水彩筆觸',
+                    '小小一隻': 'Q版比例、可愛動作',
                 }[name],
-                default=name == '精緻日系',
+                default=name == '動畫原畫',
             ) for name in IMAGE_STYLES],
         )
 
@@ -417,7 +516,7 @@ class ImageStyleView(discord.ui.View):
     def __init__(self, owner_id: int):
         super().__init__(timeout=300)
         self.owner_id = owner_id
-        self.style_name = '精緻日系'
+        self.style_name = '動畫原畫'
         self.add_item(ImageStyleSelect())
 
     @discord.ui.button(label='填寫外觀與場景', style=discord.ButtonStyle.primary, emoji='🎨')
@@ -451,7 +550,7 @@ class ImageDescriptionModal(discord.ui.Modal, title='生成角色圖片'):
 
     async def on_submit(self, interaction: discord.Interaction):
         # Acknowledge the modal immediately, before DB/network/API calls.
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=await private_reply(interaction, "生成角色圖片"), thinking=True)
         try:
             c = await get_active_or_warn(interaction)
             if not c:
@@ -462,8 +561,9 @@ class ImageDescriptionModal(discord.ui.Modal, title='生成角色圖片'):
                 c, str(self.appearance.value), self.style_name, str(self.scene.value or ''),
             )
             data = await generate_character_image(prompt)
-            if not data or len(data) > 5 * 1024 * 1024:
-                raise ValueError('生成圖片超過 5 MB 或內容為空。')
+            if not data:
+                raise ValueError('生成圖片內容為空。')
+            data = optimize_generated_image(data)
             if data.startswith(b'\x89PNG\r\n\x1a\n'):
                 ext = 'png'
             elif data.startswith(b'\xff\xd8\xff'):
@@ -476,20 +576,20 @@ class ImageDescriptionModal(discord.ui.Modal, title='生成角色圖片'):
                 f'**畫風：{self.style_name}**\n預覽圖片：確認後才會替換角色原圖（5 分鐘內有效）。',
                 file=discord.File(io.BytesIO(data), filename=f'preview.{ext}'),
                 view=GeneratedImageView(interaction.user.id, scope_of(interaction), c['id'], data),
-                ephemeral=True,
+                ephemeral=await private_reply(interaction, "生成角色圖片"),
             )
         except Exception:
             log.exception('Image generation failed')
             await interaction.followup.send('圖片生成失敗，請查看 Render Logs 的詳細錯誤。', ephemeral=True)
 
 
-@bot.tree.command(name='生成角色圖片', description='選擇六種畫風，填寫外觀與場景，生成角色圖片')
+@bot.tree.command(name='生成角色圖片', description='選擇畫風，填寫外觀與場景，生成角色圖片')
 @command
 async def image_generate(interaction: discord.Interaction):
     await interaction.response.send_message(
-        '**目前畫風：精緻日系**\n先選畫風，再點「填寫外觀與場景」。',
+        '**目前畫風：動畫原畫**\n先選畫風，再點「填寫外觀與場景」。',
         view=ImageStyleView(interaction.user.id),
-        ephemeral=True,
+        ephemeral=await private_reply(interaction),
     )
 
 class CharacterModal(discord.ui.Modal):
@@ -579,6 +679,14 @@ class PersonalityView(discord.ui.View):
         selected = initial['personality'] if initial and initial['personality'] in PERSONALITIES else None
         self.add_item(PersonalitySelect(selected))
 
+    @discord.ui.button(label='主動互動設定', style=discord.ButtonStyle.secondary, emoji='🔔', row=1)
+    async def proactive_button(self, interaction, button):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message('這不是你的角色設定。', ephemeral=True)
+        if self.cid is None:
+            return await interaction.response.send_message('請先建立角色，再設定主動互動。', ephemeral=True)
+        await open_proactive_settings(interaction, self.cid, self.scope)
+
 
 @bot.tree.command(name='建立角色', description='建立新角色（可上傳圖片並從列表選擇個性）')
 @command
@@ -588,7 +696,7 @@ async def create_character(interaction: discord.Interaction, 圖片: discord.Att
         return await send_error(interaction, '需要管理伺服器權限才能在此伺服器建立角色。')
     await interaction.response.send_message(
         '先選擇角色個性，再填寫角色資料：',
-        view=PersonalityView(interaction, image=圖片), ephemeral=True)
+        view=PersonalityView(interaction, image=圖片), ephemeral=await private_reply(interaction))
 
 
 @bot.tree.command(name='角色列表', description='查看所有角色；即使還沒建立角色也能使用')
@@ -605,7 +713,7 @@ async def character_list(interaction: discord.Interaction):
         return '🎭 **角色列表**\n' + '\n'.join(lines) + ('\n（只顯示前 20 位）' if len(rows)>20 else '')
     text = await guarded(interaction, work)
     if text is not None:
-        await interaction.followup.send(text[:1950], ephemeral=True)
+        await interaction.followup.send(text[:1950], ephemeral=await private_reply(interaction))
 
 
 async def get_active_or_warn(interaction):
@@ -644,10 +752,227 @@ async def character_status(interaction: discord.Interaction):
             log.warning('Character portrait unavailable for card: id=%s', c['id'])
     try:
         card = await asyncio.to_thread(render_character_card, c, p, portrait, relationship(p['affection']))
-        await interaction.followup.send(file=discord.File(card, filename='echonest-character.png'), ephemeral=True)
+        await interaction.followup.send(file=discord.File(card, filename='echonest-character.png'), ephemeral=await private_reply(interaction))
     except Exception:
         log.exception('Character card render failed')
-        await interaction.followup.send('角色卡生成失敗，請查看 Render Logs。', ephemeral=True)
+        await interaction.followup.send('角色卡生成失敗，請查看 Render Logs。', ephemeral=await private_reply(interaction))
+
+
+# Per-user, per-character proactive messages. Only explicitly enabled settings are scheduled.
+TAIPEI = ZoneInfo('Asia/Taipei')
+FREQUENCY = {'偶爾': (2, 3, 7), '普通': (1, 2, 1), '話很多': (3, 4, 1)}
+
+
+def next_proactive_at(setting, now=None):
+    now = now or datetime.now(timezone.utc)
+    local = now.astimezone(TAIPEI)
+    low, high, days = FREQUENCY[setting['frequency']]
+    # A randomized delay, with a hard minimum to prevent message bursts.
+    if days == 7:
+        delay = timedelta(hours=random.uniform(48, 84))
+    else:
+        delay = timedelta(hours=random.uniform(24 / high, 24 / low))
+    candidate = (local + delay).replace(second=0, microsecond=0)
+    start, end = setting['start_hour'], setting['end_hour']
+    if not start <= candidate.hour < end:
+        candidate = candidate.replace(hour=start, minute=random.randrange(0, 60))
+        if candidate <= local + timedelta(hours=1):
+            candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc)
+
+
+def proactive_settings(scope, uid, cid):
+    return db.one('''SELECT * FROM bot_proactive_settings
+        WHERE scope=%s AND user_id=%s AND character_id=%s''', (scope, uid, cid))
+
+
+class ProactiveHoursModal(discord.ui.Modal, title='主動互動｜允許時段'):
+    start = discord.ui.TextInput(label='開始時間（0～23 點）', default='9', max_length=2)
+    end = discord.ui.TextInput(label='結束時間（1～24 點）', default='22', max_length=2)
+
+    def __init__(self, view):
+        super().__init__()
+        self.owner_view = view
+        self.start.default = str(view.setting['start_hour'])
+        self.end.default = str(view.setting['end_hour'])
+
+    async def on_submit(self, interaction):
+        if interaction.user.id != self.owner_view.owner_id:
+            return await interaction.response.send_message('無權限操作。', ephemeral=True)
+        try:
+            start, end = int(self.start.value), int(self.end.value)
+            if not 0 <= start < end <= 24:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message('請輸入有效時段，例如 9 和 22；結束時間需晚於開始時間。', ephemeral=True)
+        await self.owner_view.update(interaction, start_hour=start, end_hour=end)
+
+
+class ProactiveFrequency(discord.ui.Select):
+    def __init__(self):
+        super().__init__(placeholder='選擇打擾頻率', options=[
+            discord.SelectOption(label='偶爾', description='每週約 2～3 次'),
+            discord.SelectOption(label='普通', description='每天約 1～2 次'),
+            discord.SelectOption(label='話很多', description='每天約 3～4 次')])
+
+    async def callback(self, interaction):
+        await self.view.update(interaction, frequency=self.values[0])
+
+
+class ProactiveView(discord.ui.View):
+    def __init__(self, owner_id, scope, cid, setting):
+        super().__init__(timeout=300)
+        self.owner_id, self.scope, self.cid = owner_id, scope, cid
+        self.setting = dict(setting) if setting else {
+            'enabled': False, 'frequency': '普通', 'start_hour': 9,
+            'end_hour': 22, 'destination': 'dm', 'channel_id': None}
+        self.add_item(ProactiveFrequency())
+
+    def summary(self):
+        v = self.setting
+        dest = 'Discord 私訊' if v['destination'] == 'dm' else f'<#{v["channel_id"]}>'
+        return (f'**主動互動｜角色 ID {self.cid}**\n'
+                f'狀態：{"開啟" if v["enabled"] else "關閉"}\n'
+                f'頻率：{v["frequency"]}\n'
+                f'時間：{v["start_hour"]:02d}:00～{v["end_hour"]:02d}:00（台灣時間）\n'
+                f'發送：{dest}\n設定只影響此角色與你的互動。')
+
+    async def update(self, interaction, **changes):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message('這不是你的設定。', ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        self.setting.update(changes)
+        v = self.setting
+        try:
+            def save():
+                with db.transaction() as conn:
+                    conn.execute('''INSERT INTO bot_proactive_settings
+                        (scope,user_id,character_id,enabled,frequency,start_hour,end_hour,destination,channel_id,next_send_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT(scope,user_id,character_id) DO UPDATE SET
+                        enabled=EXCLUDED.enabled,frequency=EXCLUDED.frequency,
+                        start_hour=EXCLUDED.start_hour,end_hour=EXCLUDED.end_hour,
+                        destination=EXCLUDED.destination,channel_id=EXCLUDED.channel_id,
+                        next_send_at=EXCLUDED.next_send_at''',
+                        (self.scope, str(self.owner_id), self.cid, v['enabled'], v['frequency'],
+                         v['start_hour'], v['end_hour'], v['destination'], v['channel_id'],
+                         next_proactive_at(v)))
+            await asyncio.to_thread(save)
+            await interaction.followup.send(self.summary(), ephemeral=True)
+        except Exception:
+            log.exception('Could not save proactive settings')
+            await interaction.followup.send('主動互動設定儲存失敗，請查看 Render Logs。', ephemeral=True)
+
+    @discord.ui.button(label='開啟／關閉', style=discord.ButtonStyle.primary, row=1)
+    async def toggle(self, interaction, button):
+        await self.update(interaction, enabled=not self.setting['enabled'])
+
+    @discord.ui.button(label='設定時間', style=discord.ButtonStyle.secondary, row=1)
+    async def hours(self, interaction, button):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message('這不是你的設定。', ephemeral=True)
+        await interaction.response.send_modal(ProactiveHoursModal(self))
+
+    @discord.ui.button(label='傳到私訊', style=discord.ButtonStyle.secondary, row=2)
+    async def dm(self, interaction, button):
+        await self.update(interaction, destination='dm', channel_id=None)
+
+    @discord.ui.button(label='傳到目前頻道', style=discord.ButtonStyle.secondary, row=2)
+    async def channel(self, interaction, button):
+        if not interaction.guild_id or not isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
+            return await interaction.response.send_message('請在伺服器文字頻道設定此選項。', ephemeral=True)
+        if not interaction.channel.permissions_for(interaction.guild.me).send_messages:
+            return await interaction.response.send_message('機器人沒有這個頻道的發言權限。', ephemeral=True)
+        await self.update(interaction, destination='channel', channel_id=interaction.channel_id)
+
+
+async def open_proactive_settings(interaction, cid, scope):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        setting = await asyncio.to_thread(proactive_settings, scope, str(interaction.user.id), cid)
+        view = ProactiveView(interaction.user.id, scope, cid, setting)
+        await interaction.followup.send(view.summary(), view=view, ephemeral=True)
+    except Exception:
+        log.exception('Could not open proactive settings')
+        await interaction.followup.send('讀取設定失敗。', ephemeral=True)
+
+
+async def deliver_proactive(setting):
+    # Fetch latest character record at send time.
+    scope, uid, cid = setting['scope'], setting['user_id'], setting['character_id']
+    c = await asyncio.to_thread(db.one,
+        'SELECT * FROM bot_characters WHERE id=%s AND scope=%s', (cid, scope))
+    if not c:
+        return False
+    history = await asyncio.to_thread(db.all,
+        '''SELECT role,content FROM bot_messages WHERE scope=%s AND user_id=%s
+           AND character_id=%s ORDER BY id DESC LIMIT 6''', (scope, uid, cid))
+    context = '\n'.join(f'{r["role"]}: {r["content"][:250]}' for r in reversed(history))
+    prompt = (make_system(c['name'], c['personality'], c['background'], c['speaking_style'])
+              + '\n目前心情：' + c['mood']
+              + '\n你可以主動分享一件日常小事或自然延續話題。只發一則短訊息，'
+                '不催促對方回覆，不製造愧疚或依賴感。')
+    result = await AI.aio.models.generate_content(
+        model=MODEL, contents=f'最近聊天摘要：\n{context or "暫無"}\n現在請自然地主動說一句話。',
+        config=types.GenerateContentConfig(system_instruction=prompt))
+    message = (result.text or '').strip()[:1800]
+    if not message:
+        return False
+    avatar = image_url(c['image_path'])
+    if setting['destination'] == 'dm':
+        user = await bot.fetch_user(int(uid))
+        embed = discord.Embed(description=message, color=discord.Color.blurple())
+        embed.set_author(name=c['name'], icon_url=avatar)
+        await user.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    else:
+        channel = bot.get_channel(setting['channel_id']) or await bot.fetch_channel(setting['channel_id'])
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return False
+        target = channel.parent if isinstance(channel, discord.Thread) else channel
+        if avatar and target.permissions_for(channel.guild.me).manage_webhooks:
+            hooks = await target.webhooks()
+            hook = next((h for h in hooks if h.user and h.user.id == bot.user.id and h.name == 'EchoNest'), None)
+            if hook is None:
+                hook = await target.create_webhook(name='EchoNest', reason='EchoNest proactive messages')
+            kw = {'content': message, 'username': c['name'][:80], 'avatar_url': avatar,
+                  'allowed_mentions': discord.AllowedMentions.none()}
+            if isinstance(channel, discord.Thread):
+                kw['thread'] = channel
+            await hook.send(**kw)
+        else:
+            embed = discord.Embed(description=message, color=discord.Color.blurple())
+            embed.set_author(name=c['name'], icon_url=avatar)
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    return True
+
+
+async def proactive_worker():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            rows = await asyncio.to_thread(db.all, '''SELECT * FROM bot_proactive_settings
+                WHERE enabled=TRUE AND next_send_at<=NOW()
+                ORDER BY next_send_at LIMIT 10''')
+            for row in rows:
+                # Atomically claim a job before sending; avoids duplicate sends after restart.
+                claimed = await asyncio.to_thread(db.run, '''UPDATE bot_proactive_settings
+                    SET next_send_at=%s WHERE scope=%s AND user_id=%s AND character_id=%s
+                    AND enabled=TRUE AND next_send_at=%s''',
+                    (next_proactive_at(row), row['scope'], row['user_id'], row['character_id'], row['next_send_at']))
+                if not claimed:
+                    continue
+                try:
+                    await deliver_proactive(row)
+                except (discord.Forbidden, discord.NotFound):
+                    log.warning('Proactive destination inaccessible; disabling for character %s user %s', row['character_id'], row['user_id'])
+                    await asyncio.to_thread(db.run, '''UPDATE bot_proactive_settings SET enabled=FALSE
+                        WHERE scope=%s AND user_id=%s AND character_id=%s''',
+                        (row['scope'], row['user_id'], row['character_id']))
+                except Exception:
+                    log.exception('Proactive message failed for character %s', row['character_id'])
+        except Exception:
+            log.exception('Proactive worker failed')
+        await asyncio.sleep(60)
 
 
 @bot.tree.command(name='角色設定', description='修改目前角色（可上傳新圖片）')
@@ -661,7 +986,7 @@ async def edit_character(interaction: discord.Interaction, 圖片: discord.Attac
         return await send_error(interaction, '需要管理伺服器權限才能修改角色。')
     await interaction.response.send_message(
         '選擇新的角色個性，再修改角色資料：',
-        view=PersonalityView(interaction, image=圖片, cid=c['id'], initial=c), ephemeral=True)
+        view=PersonalityView(interaction, image=圖片, cid=c['id'], initial=c), ephemeral=await private_reply(interaction))
 
 
 
@@ -776,11 +1101,11 @@ async def delete_character(interaction: discord.Interaction):
     if rows is None:
         return
     if not rows:
-        return await interaction.followup.send('目前沒有你可以刪除的角色。', ephemeral=True)
+        return await interaction.followup.send('目前沒有你可以刪除的角色。', ephemeral=await private_reply(interaction))
     await interaction.followup.send(
         '選擇要刪除的角色（刪除後無法復原）：',
         view=DeleteCharacterView(interaction.user.id, scope, rows[:25]),
-        ephemeral=True
+        ephemeral=await private_reply(interaction)
     )
 
 
@@ -802,7 +1127,7 @@ async def switch_character(interaction: discord.Interaction, 角色id: int):
     row = await guarded(interaction, work)
     if row is not None:
         await interaction.followup.send(
-            f'已切換至 **{discord.utils.escape_markdown(row["name"])}**。' if row else '找不到這個角色 ID。', ephemeral=True)
+            f'已切換至 **{discord.utils.escape_markdown(row["name"])}**。' if row else '找不到這個角色 ID。', ephemeral=await private_reply(interaction))
 
 
 @bot.tree.command(name='背包', description='查看自己的禮物道具')
@@ -815,7 +1140,7 @@ async def inventory(interaction: discord.Interaction):
         'SELECT item,quantity FROM bot_inventory WHERE scope=%s AND user_id=%s AND quantity>0', (scope, uid)))
     if rows is not None:
         await interaction.followup.send('🎒 **背包**\n' + ('\n'.join(f'{r["item"]} ×{r["quantity"]}' for r in rows)
-                              if rows else '目前沒有道具。'), ephemeral=True)
+                              if rows else '目前沒有道具。'), ephemeral=await private_reply(interaction))
 
 
 @bot.tree.command(name='簽到', description='每日簽到獲得一份隨機禮物')
@@ -839,7 +1164,7 @@ async def checkin(interaction: discord.Interaction):
     changed = await guarded(interaction, work)
     if changed is not None:
         await interaction.followup.send(f'🎁 簽到成功，獲得 **{item} ×1**！' if changed else
-                                        '今天已簽到過了（台灣時間每日重置）。', ephemeral=True)
+                                        '今天已簽到過了（台灣時間每日重置）。', ephemeral=await private_reply(interaction))
 
 
 class GiftSelect(discord.ui.Select):
@@ -897,7 +1222,10 @@ class GiftView(discord.ui.View):
                 message = await asyncio.to_thread(work)
                 for child in self.children:
                     child.disabled = True
-                await interaction.message.edit(view=self)
+                try:
+                    await interaction.message.edit(view=self)
+                except discord.HTTPException:
+                    log.warning('Could not disable image confirmation buttons', exc_info=True)
                 await interaction.followup.send(message, ephemeral=True)
             except Exception:
                 log.exception('Gift failed')
@@ -923,11 +1251,11 @@ async def gift(interaction: discord.Interaction):
         'SELECT item,quantity FROM bot_inventory WHERE scope=%s AND user_id=%s AND quantity>0 ORDER BY item',
         (scope, uid))
     if not any(r['item'] in ITEMS for r in rows):
-        return await interaction.response.send_message('🎒 背包裡沒有可送出的禮物。先使用 `/簽到` 取得道具吧。', ephemeral=True)
+        return await interaction.response.send_message('🎒 背包裡沒有可送出的禮物。先使用 `/簽到` 取得道具吧。', ephemeral=await private_reply(interaction))
     await interaction.response.send_message('🎒 **你的背包**\n' +
         '\n'.join(f'• {r["item"]} ×{r["quantity"]}' for r in rows if r['item'] in ITEMS) +
         '\n\n請在下方選擇禮物。',
-        view=GiftView(interaction.user.id, scope, c['id'], c['name'], rows), ephemeral=True)
+        view=GiftView(interaction.user.id, scope, c['id'], c['name'], rows), ephemeral=await private_reply(interaction))
 
 
 async def update_memory(scope, uid, cid):
@@ -996,7 +1324,7 @@ async def chat(interaction: discord.Interaction, 內容: str):
     c = await get_active_or_warn(interaction)
     if not c:
         return
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(ephemeral=await private_reply(interaction), thinking=True)
     scope, uid, cid = scope_of(interaction), str(interaction.user.id), c['id']
     try:
         def read():
@@ -1032,24 +1360,27 @@ async def chat(interaction: discord.Interaction, 內容: str):
                     progress(conn, scope, uid, cid, 'chat')
                 return affection_delta if changed else None
         applied_delta = await asyncio.to_thread(save)
+        c = await asyncio.to_thread(db.one, 'SELECT * FROM bot_characters WHERE id=%s AND scope=%s', (cid, scope)) or c
         embed = discord.Embed(description=reply[:3900], color=discord.Color.blurple())
         embed.set_author(name=c['name'], icon_url=image_url(c['image_path']))
         if applied_delta is not None:
             change = f'+{applied_delta}' if applied_delta > 0 else str(applied_delta)
             embed.set_footer(text=f'好感度 {change}｜EXP +8')
+        is_private_chat = await private_reply(interaction, "聊天")
         sent = False
         try:
-            sent = await send_character_webhook(interaction, c, reply)
+            if not is_private_chat:
+                sent = await send_character_webhook(interaction, c, reply)
         except (discord.Forbidden, discord.HTTPException):
             log.warning('Webhook unavailable; falling back to embed', exc_info=True)
         if sent:
-            await interaction.followup.send('已由角色發送回覆。', ephemeral=True)
+            await interaction.followup.send('已由角色發送回覆。', ephemeral=await private_reply(interaction))
         else:
-            await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await interaction.followup.send(embed=embed, ephemeral=is_private_chat, allowed_mentions=discord.AllowedMentions.none())
         await update_memory(scope, uid, cid)
     except Exception:
         log.exception('Chat failed')
-        await interaction.followup.send('聊天失敗，請檢查 Gemini 或 Supabase 設定及 Render Logs。', ephemeral=True)
+        await interaction.followup.send('聊天失敗，請檢查 Gemini 或 Supabase 設定及 Render Logs。', ephemeral=await private_reply(interaction))
 
 
 class StoryView(discord.ui.View):
@@ -1087,20 +1418,20 @@ async def explore(interaction: discord.Interaction):
     c = await get_active_or_warn(interaction)
     if not c:
         return
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(ephemeral=await private_reply(interaction), thinking=True)
     scope, uid = scope_of(interaction), str(interaction.user.id)
     try:
         result = await asyncio.to_thread(start_event, db, scope, uid, c['id'], c['name'])
         if not result:
-            return await interaction.followup.send('今天的 3 次探索已完成，明天再來看看新故事吧。', ephemeral=True)
+            return await interaction.followup.send('今天的 3 次探索已完成，明天再來看看新故事吧。', ephemeral=await private_reply(interaction))
         event = result['event']
         embed = discord.Embed(title='✦ '+event['title'], description=event['story'].format(name=c['name']), color=discord.Color.purple())
         embed.set_footer(text='選擇一個行動 · 事件選項保留 20 分鐘 · 台灣時間每日最多完成 3 次')
         await interaction.followup.send(embed=embed,
-            view=StoryView(interaction.user.id, scope, c['id'], result['id'], event), ephemeral=True)
+            view=StoryView(interaction.user.id, scope, c['id'], result['id'], event), ephemeral=await private_reply(interaction))
     except Exception:
         log.exception('Explore failed')
-        await interaction.followup.send('探索失敗，請查看 Render Logs。', ephemeral=True)
+        await interaction.followup.send('探索失敗，請查看 Render Logs。', ephemeral=await private_reply(interaction))
 
 
 @bot.tree.command(name='任務', description='查看每週任務、獎勵與完成進度')
@@ -1121,7 +1452,7 @@ async def quests(interaction: discord.Interaction):
     for action,(name,limit) in QUESTS.items():
         count = min(data.get(action,0),limit)
         embed.add_field(name=('✅ ' if count>=limit else '◻️ ')+name,value=f'{count}/{limit}',inline=False)
-    await interaction.followup.send(embed=embed,ephemeral=True)
+    await interaction.followup.send(embed=embed,ephemeral=await private_reply(interaction))
 
 
 @bot.tree.command(name='收藏', description='查看角色專屬紀念品與故事回憶')
@@ -1144,7 +1475,7 @@ async def collection(interaction: discord.Interaction):
     embed = discord.Embed(title=f'✦ {c["name"]} 的收藏冊',color=discord.Color.gold())
     embed.add_field(name=f'紀念品（{len(items)} 件）',value=' · '.join(r['item'] for r in items)[:950] if items else '尚無紀念品，使用 /探索 解鎖。',inline=False)
     embed.add_field(name='最近的故事',value='\n'.join(f'• {r["event_title"]} — {r["choice"]}' for r in stories) if stories else '還沒有共同故事。',inline=False)
-    await interaction.followup.send(embed=embed,ephemeral=True)
+    await interaction.followup.send(embed=embed,ephemeral=await private_reply(interaction))
 
 
 @bot.event

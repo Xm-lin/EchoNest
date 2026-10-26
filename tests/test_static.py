@@ -7,7 +7,7 @@ module = ast.parse(source)
 commands = [node for node in module.body if isinstance(node, ast.AsyncFunctionDef)
             and any(isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
                     and d.func.attr == 'command' for d in node.decorator_list)]
-assert len(commands) == 14, [n.name for n in commands]
+assert len(commands) == 15, [n.name for n in commands]
 for command in commands:
     assert any(isinstance(d, ast.Name) and d.id == 'command' for d in command.decorator_list), command.name
 assert 'authorizing_integration_owners or {}' not in source
@@ -15,4 +15,4 @@ assert 'discord.Attachment' in source
 assert 'system_message' in source
 assert 'CREATE TABLE IF NOT EXISTS bot_characters' in (ROOT / 'database.py').read_text()
 assert 'CREATE TABLE IF NOT EXISTS bot_memories' in (ROOT / 'database.py').read_text()
-print('Static tests passed: 14 slash commands, attachment support, isolated schema')
+print('Static tests passed: 15 slash commands, attachment support, isolated schema')

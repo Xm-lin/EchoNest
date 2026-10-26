@@ -5,6 +5,10 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 SCHEMA = '''
+CREATE TABLE IF NOT EXISTS bot_reply_settings (
+ user_id TEXT NOT NULL, command_name TEXT NOT NULL, private BOOLEAN NOT NULL DEFAULT TRUE,
+ PRIMARY KEY(user_id,command_name)
+);
 CREATE TABLE IF NOT EXISTS bot_characters (
  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  scope TEXT NOT NULL, name TEXT NOT NULL, personality TEXT NOT NULL,
@@ -14,6 +18,18 @@ CREATE TABLE IF NOT EXISTS bot_characters (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS bot_characters_scope_idx ON bot_characters(scope,id);
+CREATE TABLE IF NOT EXISTS bot_proactive_settings (
+ scope TEXT NOT NULL, user_id TEXT NOT NULL,
+ character_id BIGINT NOT NULL REFERENCES bot_characters(id) ON DELETE CASCADE,
+ enabled BOOLEAN NOT NULL DEFAULT FALSE,
+ frequency TEXT NOT NULL DEFAULT '普通',
+ start_hour SMALLINT NOT NULL DEFAULT 9,
+ end_hour SMALLINT NOT NULL DEFAULT 22,
+ destination TEXT NOT NULL DEFAULT 'dm',
+ channel_id BIGINT,
+ next_send_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(scope,user_id,character_id)
+);
 CREATE TABLE IF NOT EXISTS bot_active (
  scope TEXT NOT NULL, user_id TEXT NOT NULL, character_id BIGINT NOT NULL REFERENCES bot_characters(id) ON DELETE CASCADE,
  PRIMARY KEY(scope,user_id)
