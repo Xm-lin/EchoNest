@@ -1,3 +1,45 @@
+# EchoNest v8 — Discord AI 角色機器人
+
+沿用 v7 的角色、資料庫與 Pillow 角色卡，新增三項功能：
+
+1. **`/送禮` 背包選單**：顯示持有的禮物及數量，選擇後確認才扣除道具；送出後顯示剩餘數量。
+2. **`/聊天` Webhook 角色頭像**：在具備 `Manage Webhooks` 權限的伺服器文字頻道，以角色名稱與 Supabase 角色圖片作為訊息左側的圓形頭像。無權限、私訊、無圖片時回退 Embed。Webhook 重複使用，不會每次建立。
+3. **`/生成角色圖片 描述`**：呼叫外部生圖 API，私密預覽，按「使用這張角色圖片」才上傳 Supabase 並替換；可取消。限制 5MB、僅角色建立者或管理員可修改。
+
+共有 **14 個 Slash Commands**。保留建立角色、角色列表、切換角色、角色設定、刪除角色、角色狀態、聊天、背包、簽到、送禮、探索、任務、收藏等既有功能。
+
+## Render 環境變數
+
+保留 v7 原本的 `DISCORD_TOKEN`、`GEMINI_API_KEY`、`GEMINI_MODEL`、`DATABASE_URL`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`SUPABASE_STORAGE_BUCKET`。
+
+選用圖片生成服務時，額外設定：
+
+```dotenv
+IMAGE_API_KEY=你的圖片服務金鑰
+IMAGE_API_URL=https://你的圖片服務提供的完整圖片生成端點
+IMAGE_MODEL=供應商提供的模型ID
+```
+
+也支援 `AGNES_API_KEY` 作為金鑰變數名稱。**注意：Agnes 是否支援此 OpenAI 相容端點及模型名稱，必須依實際供應商文件確認。** 本專案未內建或假設任何未驗證的 Agnes API URL。API 預期接受 JSON `{model,prompt,n}`，回傳 `data[0].b64_json` 或 `data[0].url` 等常見格式；不相容時需調整 `generate_character_image()`。未設定 API 時，其他 13 個指令仍可正常使用。
+
+## Discord 權限
+
+Webhook 需要機器人在目標文字頻道擁有 **Manage Webhooks**。請確保 Supabase `characters` bucket 是 Public，且角色已有上傳圖片。私訊和無權限頻道會退回原本的 Embed，並不會修改 Bot 帳號本身的頭像。
+
+## 部署與測試
+
+把 ZIP 內檔案放到 GitHub 專案根目錄，Render 部署最新 commit。保留現有 Supabase 資料庫，程式會沿用既有資料表。
+
+```bash
+python tests/test_static.py
+python tests/test_game.py
+python -m compileall -q bot.py character_card.py database.py game.py
+```
+
+這些是本機靜態／遊戲測試，**未在你的 Discord、Render、Supabase 或 Agnes 帳號實際進行端對端測試**。
+
+---
+
 # EchoNest v5 — Discord 角色養成遊戲
 
 基於 v4 升級，保留既有 Discord / Gemini / Supabase 架構，新增故事探索、收藏、每週任務與大圖角色檔案。**不需重建資料庫、不需清空舊角色。**
@@ -65,3 +107,15 @@ python -m compileall -q bot.py database.py game.py
 - Render Docker 已安裝 `fonts-noto-cjk`，可以顯示繁體中文。
 - 角色圖由 Supabase Storage 讀取；其他數值由 PostgreSQL 讀取，每次呼叫即時渲染。
 - 模板本身不包含示範用角色圖片；請在 Discord 上傳你自己的圖片。
+
+### 簡約角色卡（無 AI 生成）
+`/角色狀態` 使用 `character_card.py` 的 Pillow 模板，直接合成使用者上傳的角色圖片、角色名稱、關係階段、心情、個性、等級、EXP 和好感度。沒有邊框、裝飾性英文或 AI 圖片生成；無角色圖片時使用簡單的中性色佔位背景。Render Dockerfile 已安裝 Noto CJK 字型。
+
+
+## 角色卡固定模板（v7）
+
+- `/角色狀態` 使用 Pillow 產生 900 × 1340 PNG；不使用 AI 生成角色卡。
+- `assets/character_card_base.png` 是可自行替換的**空白底板**，不可預先放入角色名稱、圖片、數值。
+- `character_card.py` 將 Supabase 角色圖片、名稱、關係、心情、個性、等級、EXP、好感度填到固定位置。
+- 可以用外部繪圖工具或 AI 製作**空白底板**，但需維持 900 × 1340 並保留角色圖與文字區域；正式生成不依賴 AI API。
+- `assets/character_card_base.png` 可自行替換。角色圖片仍從玩家上傳的 Supabase Storage 取得。

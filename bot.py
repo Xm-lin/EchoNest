@@ -1,6 +1,8 @@
 """EchoNest: multi-character Discord AI bot (Render + Supabase)."""
 import asyncio
 import json
+import io
+import base64
 import logging
 import os
 import random
@@ -156,6 +158,180 @@ async def upload_image(attachment, scope):
             log.error('Storage upload failed: HTTP %s; body=%s', response.status_code, response.text[:400])
             raise RuntimeError(f'圖片上傳失敗（Storage HTTP {response.status_code}）')
     return path
+
+
+async def upload_image_bytes(data: bytes, scope: str) -> str:
+    """Store validated PNG/JPEG/WEBP output in the existing public character bucket."""
+    if not data or len(data) > 5 * 1024 * 1024:
+        raise ValueError('圖片不可為空且不能超過 5 MB。')
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        ext, mime = 'png', 'image/png'
+    elif data.startswith(b'\xff\xd8\xff'):
+        ext, mime = 'jpg', 'image/jpeg'
+    elif data.startswith(b'RIFF') and data[8:12] == b'WEBP':
+        ext, mime = 'webp', 'image/webp'
+    else:
+        raise ValueError('生圖服務沒有回傳有效的 PNG/JPEG/WEBP。')
+    path = f'{scope.replace(":", "-")}/{uuid.uuid4().hex}.{ext}'
+    endpoint = f'{SUPABASE_URL}/storage/v1/object/{quote(BUCKET)}/{quote(path, safe="/")}'
+    async with httpx.AsyncClient(timeout=40) as client:
+        response = await client.post(endpoint, content=data, headers={
+            'Authorization': f'Bearer {STORAGE_KEY}', 'apikey': STORAGE_KEY,
+            'Content-Type': mime, 'x-upsert': 'false'})
+        response.raise_for_status()
+    return path
+
+
+async def generate_character_image(prompt: str) -> bytes:
+    """OpenAI-compatible images/generations endpoint; provider/model are configurable.
+
+    Some Agnes deployments may expose different endpoints or response formats.
+    Verify their documentation before configuring IMAGE_API_URL and IMAGE_MODEL.
+    """
+    api_key = os.getenv('IMAGE_API_KEY') or os.getenv('AGNES_API_KEY')
+    api_url = os.getenv('IMAGE_API_URL')
+    model = os.getenv('IMAGE_MODEL')
+    if not all((api_key, api_url, model)):
+        raise RuntimeError('請先設定 IMAGE_API_KEY（或 AGNES_API_KEY）、IMAGE_API_URL、IMAGE_MODEL。')
+    if not api_url.startswith('https://'):
+        raise ValueError('IMAGE_API_URL 必須是 HTTPS。')
+    async with httpx.AsyncClient(timeout=150, follow_redirects=False) as client:
+        response = await client.post(api_url, headers={'Authorization': f'Bearer {api_key}'},
+                                     json={'model': model, 'prompt': prompt[:1600], 'n': 1})
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get('data') or payload.get('images') or []
+        item = items[0] if items else payload
+        if isinstance(item, str):
+            item = {'url': item}
+        b64 = item.get('b64_json') or item.get('base64') or item.get('image_base64')
+        if b64:
+            if ',' in b64 and b64.startswith('data:'):
+                b64 = b64.split(',', 1)[1]
+            return base64.b64decode(b64, validate=True)
+        url = item.get('url')
+        if url:
+            from urllib.parse import urlsplit
+            parts = urlsplit(url)
+            if parts.scheme != 'https' or not parts.hostname:
+                raise ValueError('生圖服務提供的圖片網址不安全。')
+            image_response = await client.get(url)
+            image_response.raise_for_status()
+            if len(image_response.content) > 5 * 1024 * 1024:
+                raise ValueError('生成圖片超過 5 MB。')
+            return image_response.content
+    raise RuntimeError('圖片 API 回應沒有可辨識的圖片內容，請核對供應商格式。')
+
+
+async def send_character_webhook(interaction, character, reply):
+    """Use the role's avatar for the actual Discord message circle in guild channels."""
+    channel = interaction.channel
+    if interaction.guild_id is None or not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        return False
+    target = channel.parent if isinstance(channel, discord.Thread) else channel
+    if target is None or not target.permissions_for(interaction.guild.me).manage_webhooks:
+        return False
+    avatar = image_url(character['image_path'])
+    if not avatar:
+        return False
+    hooks = await target.webhooks()
+    hook = next((h for h in hooks if h.user and h.user.id == bot.user.id and h.name == 'EchoNest'), None)
+    if hook is None:
+        hook = await target.create_webhook(name='EchoNest', reason='EchoNest role chat avatar')
+    kwargs = {'content': reply[:2000], 'username': character['name'][:80],
+              'avatar_url': avatar, 'allowed_mentions': discord.AllowedMentions.none(), 'wait': True}
+    if isinstance(channel, discord.Thread):
+        kwargs['thread'] = channel
+    await hook.send(**kwargs)
+    return True
+
+
+class GeneratedImageView(discord.ui.View):
+    def __init__(self, owner_id, scope, cid, image_bytes):
+        super().__init__(timeout=300)
+        self.owner_id, self.scope, self.cid = owner_id, scope, cid
+        self.image_bytes = image_bytes
+        self.lock = asyncio.Lock()
+
+    @discord.ui.button(label='使用這張角色圖片', style=discord.ButtonStyle.success, emoji='✅')
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message('只有發起生成的人能確認。', ephemeral=True)
+        async with self.lock:
+            if self.image_bytes is None:
+                return await interaction.response.send_message('這張圖片已經處理過了。', ephemeral=True)
+            await interaction.response.defer(ephemeral=True)
+            new_path = None
+            try:
+                new_path = await upload_image_bytes(self.image_bytes, self.scope)
+                def save():
+                    with db.transaction() as conn:
+                        old = conn.execute('SELECT image_path,created_by FROM bot_characters WHERE id=%s AND scope=%s FOR UPDATE',
+                                           (self.cid, self.scope)).fetchone()
+                        if not old or (old['created_by'] != str(self.owner_id) and not may_edit(interaction)):
+                            return None
+                        conn.execute('UPDATE bot_characters SET image_path=%s WHERE id=%s AND scope=%s',
+                                     (new_path, self.cid, self.scope))
+                        return (True, old['image_path'])
+                saved = await asyncio.to_thread(save)
+                if saved is None:
+                    await remove_character_image(new_path)
+                    return await interaction.followup.send('角色已不存在或你沒有權限修改。', ephemeral=True)
+                old_path = saved[1]
+                self.image_bytes = None
+                for child in self.children:
+                    child.disabled = True
+                await interaction.message.edit(view=self)
+                await interaction.followup.send('角色圖片已更新！角色卡和後續 Webhook 聊天頭像會使用新圖。', ephemeral=True)
+                if old_path and old_path != new_path:
+                    try:
+                        await remove_character_image(old_path)
+                    except Exception:
+                        log.warning('Could not remove previous image', exc_info=True)
+            except Exception:
+                log.exception('Could not save generated image')
+                await interaction.followup.send('圖片儲存失敗，原本角色圖片未變更。', ephemeral=True)
+
+    @discord.ui.button(label='取消', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message('只有發起生成的人能取消。', ephemeral=True)
+        self.image_bytes = None
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content='已取消，角色圖片沒有變更。', attachments=[], view=self)
+
+
+@bot.tree.command(name='生成角色圖片', description='透過外部圖片 API 生成並預覽角色圖片')
+@command
+@app_commands.describe(描述='角色的外觀、服裝與畫風')
+async def image_generate(interaction: discord.Interaction, 描述: str):
+    c = await get_active_or_warn(interaction)
+    if not c:
+        return
+    if c['created_by'] != str(interaction.user.id) and not may_edit(interaction):
+        return await send_error(interaction, '只有角色建立者或伺服器管理員能更換圖片。')
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        prompt = f'單人虛構角色立繪，角色名稱：{c["name"]}。背景設定：{c["background"][:300]}。外觀要求：{描述[:900]}。不要文字、浮水印或介面。'
+        data = await generate_character_image(prompt)
+        # Validate the actual bytes before showing a preview.
+        if not data or len(data) > 5 * 1024 * 1024:
+            raise ValueError('生成圖片超過 5 MB 或內容為空。')
+        if data.startswith(b'\x89PNG\r\n\x1a\n'):
+            ext = 'png'
+        elif data.startswith(b'\xff\xd8\xff'):
+            ext = 'jpg'
+        elif data.startswith(b'RIFF') and data[8:12] == b'WEBP':
+            ext = 'webp'
+        else:
+            raise ValueError('不支援的圖片格式。')
+        await interaction.followup.send('預覽圖片：確認後才會替換角色原圖（5 分鐘內有效）。',
+            file=discord.File(io.BytesIO(data), filename=f'preview.{ext}'),
+            view=GeneratedImageView(interaction.user.id, scope_of(interaction), c['id'], data), ephemeral=True)
+    except Exception:
+        log.exception('Image generation failed')
+        await interaction.followup.send('圖片生成失敗。請確認圖片 API 設定、額度和回應格式，並查看 Render Logs。', ephemeral=True)
 
 
 async def send_error(interaction, message):
@@ -542,30 +718,92 @@ async def checkin(interaction: discord.Interaction):
                                         '今天已簽到過了（台灣時間每日重置）。', ephemeral=True)
 
 
-@bot.tree.command(name='送禮', description='送禮給目前角色，增加好感度')
+class GiftSelect(discord.ui.Select):
+    def __init__(self, rows):
+        options = [discord.SelectOption(label=r['item'], value=r['item'],
+                   description=f'目前持有 ×{r["quantity"]}｜好感度 +{ITEMS[r["item"]]}')
+                   for r in rows if r['item'] in ITEMS][:25]
+        super().__init__(placeholder='從背包選擇要送出的禮物', options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if interaction.user.id != view.owner:
+            return await interaction.response.send_message('這不是你的背包。', ephemeral=True)
+        view.item = self.values[0]
+        await interaction.response.edit_message(content=f'要送給 **{discord.utils.escape_markdown(view.name)}** **{view.item} ×1** 嗎？', view=view)
+
+
+class GiftView(discord.ui.View):
+    def __init__(self, owner, scope, cid, name, rows):
+        super().__init__(timeout=180)
+        self.owner, self.scope, self.cid, self.name = owner, scope, cid, name
+        self.item = None
+        self.lock = asyncio.Lock()
+        self.add_item(GiftSelect(rows))
+
+    @discord.ui.button(label='確認送禮', style=discord.ButtonStyle.success, emoji='🎁')
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner:
+            return await interaction.response.send_message('這不是你的送禮選單。', ephemeral=True)
+        if not self.item:
+            return await interaction.response.send_message('請先選擇禮物。', ephemeral=True)
+        async with self.lock:
+            await interaction.response.defer(ephemeral=True)
+            item = self.item
+            def work():
+                with db.transaction() as conn:
+                    exists = conn.execute('SELECT id FROM bot_characters WHERE id=%s AND scope=%s',
+                                          (self.cid, self.scope)).fetchone()
+                    if not exists:
+                        return '角色已不存在。'
+                    changed = conn.execute('''UPDATE bot_inventory SET quantity=quantity-1
+                        WHERE scope=%s AND user_id=%s AND item=%s AND quantity>0''',
+                        (self.scope, str(self.owner), item)).rowcount
+                    if not changed:
+                        return '背包中的這項禮物已經用完了。'
+                    conn.execute('''INSERT INTO bot_profiles(scope,user_id,character_id,affection)
+                        VALUES(%s,%s,%s,%s) ON CONFLICT(scope,user_id,character_id)
+                        DO UPDATE SET affection=LEAST(100,bot_profiles.affection+EXCLUDED.affection)''',
+                        (self.scope, str(self.owner), self.cid, ITEMS[item]))
+                    progress(conn, self.scope, str(self.owner), self.cid, 'gift')
+                    left = conn.execute('SELECT quantity FROM bot_inventory WHERE scope=%s AND user_id=%s AND item=%s',
+                                        (self.scope, str(self.owner), item)).fetchone()['quantity']
+                    return f'🎁 已送出 **{item} ×1** 給 **{discord.utils.escape_markdown(self.name)}**！好感度 +{ITEMS[item]}｜剩餘 {left} 個。'
+            try:
+                message = await asyncio.to_thread(work)
+                for child in self.children:
+                    child.disabled = True
+                await interaction.message.edit(view=self)
+                await interaction.followup.send(message, ephemeral=True)
+            except Exception:
+                log.exception('Gift failed')
+                await interaction.followup.send('送禮失敗，請查看 Render Logs。', ephemeral=True)
+
+    @discord.ui.button(label='取消', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner:
+            return await interaction.response.send_message('這不是你的送禮選單。', ephemeral=True)
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content='已取消送禮。', view=self)
+
+
+@bot.tree.command(name='送禮', description='顯示背包道具與數量，選擇後確認送禮')
 @command
-@app_commands.choices(道具=[app_commands.Choice(name=k, value=k) for k in ITEMS])
-async def gift(interaction: discord.Interaction, 道具: app_commands.Choice[str]):
+async def gift(interaction: discord.Interaction):
     c = await get_active_or_warn(interaction)
     if not c:
         return
     scope, uid = scope_of(interaction), str(interaction.user.id)
-    def work():
-        with db.transaction() as conn:
-            changed = conn.execute('''UPDATE bot_inventory SET quantity=quantity-1
-                WHERE scope=%s AND user_id=%s AND item=%s AND quantity>0''',
-                (scope, uid, 道具.value)).rowcount
-            if changed:
-                conn.execute('''INSERT INTO bot_profiles(scope,user_id,character_id,affection)
-                    VALUES(%s,%s,%s,%s) ON CONFLICT(scope,user_id,character_id)
-                    DO UPDATE SET affection=LEAST(100,bot_profiles.affection+EXCLUDED.affection)''',
-                    (scope, uid, c['id'], ITEMS[道具.value]))
-                progress(conn, scope, uid, c['id'], 'gift')
-            return changed
-    changed = await guarded(interaction, work)
-    if changed is not None:
-        await interaction.followup.send(f'🎁 送出 **{道具.value}**，好感度 +{ITEMS[道具.value]}！'
-                                        if changed else '背包裡沒有這項道具，先 `/簽到` 吧。', ephemeral=True)
+    rows = await asyncio.to_thread(db.all,
+        'SELECT item,quantity FROM bot_inventory WHERE scope=%s AND user_id=%s AND quantity>0 ORDER BY item',
+        (scope, uid))
+    if not any(r['item'] in ITEMS for r in rows):
+        return await interaction.response.send_message('🎒 背包裡沒有可送出的禮物。先使用 `/簽到` 取得道具吧。', ephemeral=True)
+    await interaction.response.send_message('🎒 **你的背包**\n' +
+        '\n'.join(f'• {r["item"]} ×{r["quantity"]}' for r in rows if r['item'] in ITEMS) +
+        '\n\n請在下方選擇禮物。',
+        view=GiftView(interaction.user.id, scope, c['id'], c['name'], rows), ephemeral=True)
 
 
 async def update_memory(scope, uid, cid):
@@ -634,7 +872,7 @@ async def chat(interaction: discord.Interaction, 內容: str):
     c = await get_active_or_warn(interaction)
     if not c:
         return
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     scope, uid, cid = scope_of(interaction), str(interaction.user.id), c['id']
     try:
         def read():
@@ -675,7 +913,15 @@ async def chat(interaction: discord.Interaction, 內容: str):
         if applied_delta is not None:
             change = f'+{applied_delta}' if applied_delta > 0 else str(applied_delta)
             embed.set_footer(text=f'好感度 {change}｜EXP +8')
-        await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        sent = False
+        try:
+            sent = await send_character_webhook(interaction, c, reply)
+        except (discord.Forbidden, discord.HTTPException):
+            log.warning('Webhook unavailable; falling back to embed', exc_info=True)
+        if sent:
+            await interaction.followup.send('已由角色發送回覆。', ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         await update_memory(scope, uid, cid)
     except Exception:
         log.exception('Chat failed')
