@@ -368,42 +368,114 @@ def build_character_image_prompt(character, description, style_name, scene):
     )
 
 
-@bot.tree.command(name='生成角色圖片', description='使用 Agnes AI 生成角色圖片，可選六種畫風')
-@command
-@app_commands.describe(外觀='角色外貌、髮色、服裝等', 畫風='選擇畫風，預設精緻日系', 場景='角色的動作與背景（選填）')
-@app_commands.choices(畫風=[app_commands.Choice(name=name, value=name) for name in IMAGE_STYLES])
-async def image_generate(interaction: discord.Interaction, 外觀: str,
-                         畫風: app_commands.Choice[str] | None = None,
-                         場景: str | None = None):
-    c = await get_active_or_warn(interaction)
-    if not c:
-        return
-    if c['created_by'] != str(interaction.user.id) and not may_edit(interaction):
-        return await send_error(interaction, '只有角色建立者或伺服器管理員能更換圖片。')
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    style_name = 畫風.value if 畫風 else '精緻日系'
-    try:
-        prompt = build_character_image_prompt(c, 外觀, style_name, 場景)
-        data = await generate_character_image(prompt)
-        if not data or len(data) > 5 * 1024 * 1024:
-            raise ValueError('生成圖片超過 5 MB 或內容為空。')
-        if data.startswith(b'\x89PNG\r\n\x1a\n'):
-            ext = 'png'
-        elif data.startswith(b'\xff\xd8\xff'):
-            ext = 'jpg'
-        elif data.startswith(b'RIFF') and data[8:12] == b'WEBP':
-            ext = 'webp'
-        else:
-            raise ValueError('不支援的圖片格式。')
-        await interaction.followup.send(
-            f'**畫風：{style_name}**\n預覽圖片：確認後才會替換角色原圖（5 分鐘內有效）。',
-            file=discord.File(io.BytesIO(data), filename=f'preview.{ext}'),
-            view=GeneratedImageView(interaction.user.id, scope_of(interaction), c['id'], data),
-            ephemeral=True,
+class ImageStyleSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder='選擇圖片畫風（預設：精緻日系）',
+            min_values=1, max_values=1,
+            options=[discord.SelectOption(
+                label=name, value=name,
+                description={
+                    '精緻日系': '細膩髮絲、柔和光影，接近參考圖片',
+                    '柔和插畫': '溫暖、低飽和、手繪質感',
+                    '視覺小說': '精緻日系遊戲 CG',
+                    '像素藝術': '復古像素角色插畫',
+                    '水彩手繪': '水彩筆觸、紙張質感',
+                    'Q版可愛': '可愛比例、活潑表情',
+                }[name],
+                default=name == '精緻日系',
+            ) for name in IMAGE_STYLES],
         )
-    except Exception:
-        log.exception('Image generation failed')
-        await interaction.followup.send('圖片生成失敗。請檢查 Render Logs 的 API 狀態與錯誤內容。', ephemeral=True)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if interaction.user.id != view.owner_id:
+            return await interaction.response.send_message('這不是你的生圖選單，請自行使用 /生成角色圖片。', ephemeral=True)
+        view.style_name = self.values[0]
+        await interaction.response.edit_message(
+            content=f'**目前畫風：{view.style_name}**\n選好後點「填寫外觀與場景」。',
+            view=view,
+        )
+
+
+class ImageStyleView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.style_name = '精緻日系'
+        self.add_item(ImageStyleSelect())
+
+    @discord.ui.button(label='填寫外觀與場景', style=discord.ButtonStyle.primary, emoji='🎨')
+    async def describe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message('只有發起指令的人能操作。', ephemeral=True)
+        await interaction.response.send_modal(ImageDescriptionModal(self.style_name))
+
+    @discord.ui.button(label='取消', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message('只有發起指令的人能操作。', ephemeral=True)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content='已取消生圖。', view=self)
+
+
+class ImageDescriptionModal(discord.ui.Modal, title='生成角色圖片'):
+    appearance = discord.ui.TextInput(
+        label='角色外觀', placeholder='例如：銀灰色長髮、紫色眼睛、黑色蝴蝶結',
+        style=discord.TextStyle.paragraph, max_length=750,
+    )
+    scene = discord.ui.TextInput(
+        label='場景與動作（選填）', placeholder='例如：趴在窗邊，傍晚柔和的光線',
+        style=discord.TextStyle.paragraph, max_length=300, required=False,
+    )
+
+    def __init__(self, style_name: str):
+        super().__init__()
+        self.style_name = style_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Acknowledge the modal immediately, before DB/network/API calls.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            c = await get_active_or_warn(interaction)
+            if not c:
+                return
+            if c['created_by'] != str(interaction.user.id) and not may_edit(interaction):
+                return await interaction.followup.send('只有角色建立者或伺服器管理員能更換圖片。', ephemeral=True)
+            prompt = build_character_image_prompt(
+                c, str(self.appearance.value), self.style_name, str(self.scene.value or ''),
+            )
+            data = await generate_character_image(prompt)
+            if not data or len(data) > 5 * 1024 * 1024:
+                raise ValueError('生成圖片超過 5 MB 或內容為空。')
+            if data.startswith(b'\x89PNG\r\n\x1a\n'):
+                ext = 'png'
+            elif data.startswith(b'\xff\xd8\xff'):
+                ext = 'jpg'
+            elif data.startswith(b'RIFF') and data[8:12] == b'WEBP':
+                ext = 'webp'
+            else:
+                raise ValueError('不支援的圖片格式。')
+            await interaction.followup.send(
+                f'**畫風：{self.style_name}**\n預覽圖片：確認後才會替換角色原圖（5 分鐘內有效）。',
+                file=discord.File(io.BytesIO(data), filename=f'preview.{ext}'),
+                view=GeneratedImageView(interaction.user.id, scope_of(interaction), c['id'], data),
+                ephemeral=True,
+            )
+        except Exception:
+            log.exception('Image generation failed')
+            await interaction.followup.send('圖片生成失敗，請查看 Render Logs 的詳細錯誤。', ephemeral=True)
+
+
+@bot.tree.command(name='生成角色圖片', description='選擇六種畫風，填寫外觀與場景，生成角色圖片')
+@command
+async def image_generate(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        '**目前畫風：精緻日系**\n先選畫風，再點「填寫外觀與場景」。',
+        view=ImageStyleView(interaction.user.id),
+        ephemeral=True,
+    )
 
 class CharacterModal(discord.ui.Modal):
     name = discord.ui.TextInput(label='角色名稱', max_length=40)
