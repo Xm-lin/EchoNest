@@ -189,15 +189,15 @@ async def generate_character_image(prompt: str) -> bytes:
     Verify their documentation before configuring IMAGE_API_URL and IMAGE_MODEL.
     """
     api_key = os.getenv('IMAGE_API_KEY') or os.getenv('AGNES_API_KEY')
-    api_url = os.getenv('IMAGE_API_URL')
-    model = os.getenv('IMAGE_MODEL')
+    api_url = os.getenv('IMAGE_API_URL') or 'https://apihub.agnes-ai.com/v1/images/generations'
+    model = os.getenv('IMAGE_MODEL') or 'agnes-image-2.5-flash'
     if not all((api_key, api_url, model)):
         raise RuntimeError('請先設定 IMAGE_API_KEY（或 AGNES_API_KEY）、IMAGE_API_URL、IMAGE_MODEL。')
     if not api_url.startswith('https://'):
         raise ValueError('IMAGE_API_URL 必須是 HTTPS。')
     async with httpx.AsyncClient(timeout=150, follow_redirects=False) as client:
         response = await client.post(api_url, headers={'Authorization': f'Bearer {api_key}'},
-                                     json={'model': model, 'prompt': prompt[:1600], 'n': 1})
+                                     json={'model': model, 'prompt': prompt[:2800], 'n': 1})
         response.raise_for_status()
         payload = response.json()
         items = payload.get('data') or payload.get('images') or []
@@ -339,20 +339,52 @@ def command(func):
     return app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(func)
 
 
-@bot.tree.command(name='生成角色圖片', description='透過外部圖片 API 生成並預覽角色圖片')
+IMAGE_STYLES = {
+    '精緻日系': 'high-end Japanese anime illustration, detailed flowing hair strands, expressive eyes, delicate painterly shading, natural intimate composition, muted lavender and warm gray tones, soft cinematic window lighting, atmospheric slice-of-life setting, tasteful professional anime key visual',
+    '柔和插畫': 'soft pastel illustration, warm diffused daylight, delicate brushwork, muted colors, cozy peaceful atmosphere, gentle hand-painted textures',
+    '視覺小說': 'premium Japanese visual novel CG, carefully rendered anime character, expressive face, detailed environment, cinematic framing, polished 2D game illustration',
+    '像素藝術': 'beautiful handcrafted pixel art, 32-bit inspired sprite illustration, deliberate pixel clusters, charming detailed pixel background, consistent pixel scale',
+    '水彩手繪': 'traditional watercolor anime-inspired illustration, textured paper, transparent pigments, loose expressive brush strokes, elegant subtle colors',
+    'Q版可愛': 'chibi anime illustration, adorable stylized proportions, expressive large eyes, clean colorful illustration, charming playful background',
+}
+
+
+def build_character_image_prompt(character, description, style_name, scene):
+    """Use a fixed art direction while respecting the player's own character description."""
+    visual = IMAGE_STYLES[style_name]
+    scene = (scene or '在舒適的室內，自然地望向鏡頭').strip()[:300]
+    return (
+        'Create ONE original fictional character illustration.\n'
+        f'Art direction: {visual}.\n'
+        f'Character name (context only, DO NOT draw text): {character["name"]}.\n'
+        f'Personality: {character["personality"]}.\n'
+        f'Character background (for context): {character["background"][:240]}.\n'
+        f'Character appearance and outfit: {description[:750]}.\n'
+        f'Pose and setting: {scene}.\n'
+        'One character only. Preserve the specified physical features, hair, outfit and accessories. '
+        'Beautiful intentional composition with the character face clearly visible. '
+        'No captions, typography, watermarks, UI, photo collage, frames, or logos. '
+        'Do not imitate any named living artist or copyrighted character.'
+    )
+
+
+@bot.tree.command(name='生成角色圖片', description='使用 Agnes AI 生成角色圖片，可選六種畫風')
 @command
-@app_commands.describe(描述='角色的外觀、服裝與畫風')
-async def image_generate(interaction: discord.Interaction, 描述: str):
+@app_commands.describe(外觀='角色外貌、髮色、服裝等', 畫風='選擇畫風，預設精緻日系', 場景='角色的動作與背景（選填）')
+@app_commands.choices(畫風=[app_commands.Choice(name=name, value=name) for name in IMAGE_STYLES])
+async def image_generate(interaction: discord.Interaction, 外觀: str,
+                         畫風: app_commands.Choice[str] | None = None,
+                         場景: str | None = None):
     c = await get_active_or_warn(interaction)
     if not c:
         return
     if c['created_by'] != str(interaction.user.id) and not may_edit(interaction):
         return await send_error(interaction, '只有角色建立者或伺服器管理員能更換圖片。')
     await interaction.response.defer(ephemeral=True, thinking=True)
+    style_name = 畫風.value if 畫風 else '精緻日系'
     try:
-        prompt = f'單人虛構角色立繪，角色名稱：{c["name"]}。背景設定：{c["background"][:300]}。外觀要求：{描述[:900]}。不要文字、浮水印或介面。'
+        prompt = build_character_image_prompt(c, 外觀, style_name, 場景)
         data = await generate_character_image(prompt)
-        # Validate the actual bytes before showing a preview.
         if not data or len(data) > 5 * 1024 * 1024:
             raise ValueError('生成圖片超過 5 MB 或內容為空。')
         if data.startswith(b'\x89PNG\r\n\x1a\n'):
@@ -363,12 +395,15 @@ async def image_generate(interaction: discord.Interaction, 描述: str):
             ext = 'webp'
         else:
             raise ValueError('不支援的圖片格式。')
-        await interaction.followup.send('預覽圖片：確認後才會替換角色原圖（5 分鐘內有效）。',
+        await interaction.followup.send(
+            f'**畫風：{style_name}**\n預覽圖片：確認後才會替換角色原圖（5 分鐘內有效）。',
             file=discord.File(io.BytesIO(data), filename=f'preview.{ext}'),
-            view=GeneratedImageView(interaction.user.id, scope_of(interaction), c['id'], data), ephemeral=True)
+            view=GeneratedImageView(interaction.user.id, scope_of(interaction), c['id'], data),
+            ephemeral=True,
+        )
     except Exception:
         log.exception('Image generation failed')
-        await interaction.followup.send('圖片生成失敗。請確認圖片 API 設定、額度和回應格式，並查看 Render Logs。', ephemeral=True)
+        await interaction.followup.send('圖片生成失敗。請檢查 Render Logs 的 API 狀態與錯誤內容。', ephemeral=True)
 
 class CharacterModal(discord.ui.Modal):
     name = discord.ui.TextInput(label='角色名稱', max_length=40)

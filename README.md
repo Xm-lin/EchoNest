@@ -1,3 +1,41 @@
+# EchoNest v9 — 六種 AI 生圖畫風
+
+沿用 v8 啟動修正版的 14 個 Discord 指令與 Supabase 資料，不需重建資料庫。
+
+## `/生成角色圖片`
+
+- `外觀`：必填，例如「銀灰短髮、紫色眼睛、黑色蝴蝶結、黑色針織衫」。
+- `畫風`：Discord 原生選項，預設 **精緻日系**；也有柔和插畫、視覺小說、像素藝術、水彩手繪、Q版可愛。
+- `場景`：選填，例如「午後窗邊趴在枕頭上，望向鏡頭」。
+- 會把角色名稱、背景、個性與玩家指定的外觀、場景、畫風組合為生圖提示詞。
+- 生成後先私密預覽，只有角色建立者／管理員能按確認，確認後才覆蓋角色圖片。
+- **不會自動讀取既有角色圖當作參考圖**，因此多次生成不保證人物外貌完全一致；可在「外觀」欄固定細節。
+- 畫風使用文字提示詞引導，並非模型的專屬風格參數。
+
+## Render 生圖環境變數
+
+```dotenv
+IMAGE_API_KEY=你的Agnes金鑰
+IMAGE_API_URL=https://apihub.agnes-ai.com/v1/images/generations
+IMAGE_MODEL=agnes-image-2.5-flash
+```
+
+也接受 `AGNES_API_KEY`。URL 和模型已有預設值；仍建議在 Render 明確設定。請保留原本 Discord、Gemini、Supabase、DATABASE_URL 等環境變數。API 呼叫可能產生費用。
+
+## 安裝與驗證
+
+將 ZIP 內檔案放入 GitHub 專案根目錄，Render 部署最新 commit。
+
+```bash
+python -m compileall -q bot.py character_card.py database.py game.py
+python tests/test_static.py
+python tests/test_game.py
+```
+
+測試僅為本機靜態檢查；尚未使用你的 Agnes、Discord 或 Render 帳號實測生圖。
+
+---
+
 # EchoNest v8 — Discord AI 角色機器人
 
 沿用 v7 的角色、資料庫與 Pillow 角色卡，新增三項功能：
