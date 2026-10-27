@@ -136,7 +136,7 @@ if __name__ == "__main__":
     NAME = "Niko"
     PERSONALITY = "搞笑"
     OWNER = "小林"
-    MOOD = 100
+    MOOD = 1
     AFFECTION = 100
     LEVEL = 1
     EXP = 35
