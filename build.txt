@@ -1,0 +1,138 @@
+EchoNest
+安裝、部署與維護
+==============================
+
+本文件僅供架設者使用。玩家操作請閱讀 README.md。
+
+1. 需求
+------------------------------
+Python 3.12、Git、Discord Developer Application、Gemini API Key、Supabase PostgreSQL。
+若要啟用角色圖片，另需相容的圖片生成 API 與 Supabase Storage。
+Render 建議使用可持續執行的 Background Worker；服務方案及 Docker 支援請以 Render 當時頁面為準。
+
+2. Discord Application
+------------------------------
+前往 https://discord.com/developers/applications 建立 Application 與 Bot。
+取得 Token 並存入 DISCORD_TOKEN，不得提交 GitHub。
+設定 Guild Install 與 User Install；需要 application.commands，伺服器功能必須 Guild Install。
+啟用程式需要的 Gateway Intents，包含 Message Content、Guild Members；Privileged Intents 可能需要核准。
+以測試伺服器先確認 Slash 指令正常同步。
+
+3. Gemini
+------------------------------
+在 https://aistudio.google.com/ 取得 API Key。
+填入 GEMINI_API_KEY。GEMINI_MODEL 預設 gemini-2.5-flash，可依可用模型調整。
+必須限制 API 額度，並注意 Google 的費用、模型支援與地區限制。
+
+4. Supabase
+------------------------------
+在 https://supabase.com/ 建立專案。
+在 SQL Editor 執行 database/schema.sql（新資料庫初始化）。
+將 PostgreSQL 連線字串填入 DATABASE_URL。
+需要圖片功能時，建立 private Storage bucket：character-images。
+設定 SUPABASE_URL 與 SUPABASE_SERVICE_ROLE_KEY，僅供後端使用。
+注意：Service Role Key 權限很高，絕對不可公開。
+既有資料庫升級前必須備份，不能直接假設重新執行 schema.sql 可安全完成所有遷移。
+
+5. 圖片服務
+------------------------------
+圖片生成端點必須相容 OpenAI images/generations JSON 請求與回應格式。
+設定：
+AGENS_API_KEY=你的憑證
+AGENS_API_URL=https://實際供應商提供的圖片生成端點
+AGENS_MODEL=實際支援的模型名稱
+AGENS_IMAGE_HOST=允許下載圖片的固定 HTTPS 網域
+
+若服務回傳 base64 圖片，不需要 AGENS_IMAGE_HOST；若回傳 URL，必須指定可信任網域。
+Agens/Agnes 名稱及 API 規格必須以實際服務商文件確認；未驗證前不保證相容。
+未設定圖片服務時，其他 Bot 功能仍可運作。
+
+6. 環境變數
+------------------------------
+複製 .env.example 成 .env，至少設定：
+DISCORD_TOKEN
+DATABASE_URL
+GEMINI_API_KEY
+
+其他可選項：
+GEMINI_MODEL
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+AGENS_API_KEY
+AGENS_API_URL
+AGENS_MODEL
+AGENS_IMAGE_HOST
+LOG_LEVEL
+CHAT_DAILY_LIMIT
+CHAT_COOLDOWN_SECONDS
+AI_DAILY_TOKEN_BUDGET
+
+.env 必須加入 .gitignore。不可在日誌或 GitHub 洩漏真實憑證。
+
+7. 本機執行
+------------------------------
+Windows：
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python bot.py
+
+Linux/macOS：
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python bot.py
+
+啟動前確認 schema.sql 已完成初始化。
+
+8. Docker
+------------------------------
+docker compose build
+docker compose up -d
+docker compose logs -f
+docker compose down
+
+Docker 不應保存正式遊戲資料；資料必須儲存在 Supabase。
+
+9. Render
+------------------------------
+1. 將程式碼推送到 GitHub（不要包含 .env）。
+2. 在 Render 建立 Background Worker 並連接儲存庫。
+3. 使用 Dockerfile 作為容器啟動設定。
+4. 設定所有必要環境變數。
+5. 部署並在 Logs 確認 Discord 登入、資料庫連線、AI Worker 與排程啟動。
+6. 在 Discord 測試 /建立角色、/切換角色、/聊天、/簽到、/送禮。
+
+先部署單一 Bot 實例。多實例部署需要額外的跨實例協調與測試。
+
+10. Render Logs
+------------------------------
+所有可捕捉的系統例外必須透過 Python logging 輸出 stdout/stderr。
+預設 INFO，系統故障 ERROR，無法啟動 CRITICAL，包含 traceback。
+不得記錄聊天原文、API Key、密碼或其他敏感內容。
+Render Logs 保留期限取決於方案，必要時另設外部日誌服務。
+
+11. 常見問題
+------------------------------
+Bot 無法登入：檢查 DISCORD_TOKEN、Gateway Intents、網路及 Render Logs。
+Slash 指令不顯示：檢查安裝範圍、application.commands 授權與指令同步。
+Gemini 失敗：檢查 GEMINI_API_KEY、GEMINI_MODEL、API 額度與回應狀態。
+Supabase 失敗：檢查 DATABASE_URL、SQL 初始化、資料庫網路與權限。
+圖片失敗：檢查 AGEns API 端點與模型、Storage Bucket、圖片回應格式。
+排程未發送：檢查 DM 設定、安靜時間、最近聊天時間與 Render Logs。
+
+12. 上線驗收
+------------------------------
+[ ] 15 個指令可用且權限正確
+[ ] DM 與不同伺服器資料隔離
+[ ] 送禮、簽到、任務不會重複結算
+[ ] Gemini 逾時、速率限制能正常處理
+[ ] 記憶摘要與重要記憶正常
+[ ] 主動發言不會在安靜時間發送
+[ ] 角色刪除後不再可用，相關資料清理成功
+[ ] 圖片生成、確認與 Storage 正常（若啟用）
+[ ] Render Logs 可檢視完整錯誤且不洩漏憑證
+[ ] Render 重啟及資料庫斷線恢復測試通過
+
+重要：這份專案未連接你的真實 Discord、Gemini、Supabase、Render 憑證執行端到端測試。
+正式上線前，請完成上述驗收；不得將未測試功能視為已驗證穩定。
