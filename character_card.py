@@ -89,22 +89,23 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     d.line((88,395,723,395),fill=muted,width=2)
     d.polygon([(84,395),(96,383),(108,395),(96,407)],fill=pale)
     d.text((92,425),'等級',font=font(39),fill=(235,224,240))
-    d.text((225,397),str(level),font=font(94,'number'),fill=(245,231,249))
+    d.text((225,380),str(level),font=font(94,'number'),fill=(245,231,249))
     d.line((330,466,399,466),fill=muted,width=2)
     def stat(y, symbol, label, value, maximum):
         x=91
-        d.text((x,y-8),symbol,font=font(43,'sans'),fill=pale)
-        d.text((172,y),label,font=font(31),fill=(245,237,248))
+        d.text((x,y),symbol,font=font(43,'sans'),fill=pale)
+        d.text((170,y),label,font=font(31),fill=(245,237,248))
         maximum=max(1,int(maximum))
         d.text((287,y+4),f'{value} / {maximum}',font=font(27,'sans'),fill=pale)
-        d.rounded_rectangle((171,y+53,716,y+75),radius=11,fill=(48,44,59),outline=muted,width=2)
+        d.rounded_rectangle((171,y+20,716,y+40),radius=11,fill=(48,44,59),outline=muted,width=2)
         ratio=max(0,min(float(value)/maximum,1))
         if ratio>0:
             width=max(9,round(541*ratio))
-            d.rounded_rectangle((173,y+55,173+width,y+73),radius=9,fill=pale)
-    stat(502,'♡','好感度',int(affection),100)
-    stat(604,'☁','心情',int(mood),100)
-    stat(706,'✧','EXP',int(exp)%100,100)
+            d.rounded_rectangle((173,y+22,173+width,y+38),radius=9,fill=pale)
+
+    stat(500,'♡','好感度',int(affection),100)
+    stat(600,'☁','心情',int(mood),100)
+    stat(700,'✧','EXP',int(exp)%100,100)
     # Portrait panel.
     frame=(730,140,1544,800)
     d.rounded_rectangle((frame[0]-3,frame[1]-3,frame[2]+3,frame[3]+3),radius=20,outline=pale,width=4)
