@@ -89,7 +89,7 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     d.line((88,395,710,395),fill=muted,width=2)
     d.polygon([(84,395),(96,383),(108,395),(96,407)],fill=pale)
     d.text((92,425),'等級',font=font(39),fill=(235,224,240))
-    d.text((225,410),str(level),font=font(94,'number'),fill=(245,231,249))
+    d.text((225,400),str(level),font=font(94,'number'),fill=(245,231,249))
     def stat(y, label, value, maximum):
         d.text((100,y-5),label,font=font(31),fill=(245,237,248))
         maximum=max(1,int(maximum))
