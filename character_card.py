@@ -69,9 +69,8 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
             d.line([(x,y+sy*50),(x,y),(x+sx*75,y)],fill=pale,width=3)
             d.line([(x+sx*9,y+sy*60),(x+sx*9,y+sy*9),(x+sx*85,y+sy*9)],fill=muted,width=2)
     # Header.
-    d.text((84,63),'E C H O N E S T   /   C H A R A C T E R',font=font(23,'sans'),fill=pale)
+    d.text((90,63),'E C H O N E S T   /   C H A R A C T E R',font=font(23,'sans'),fill=pale)
     d.line((550,81,743,81),fill=muted,width=2)
-    d.text((1405,61),'No. 001',font=font(24,'sans'),fill=pale)
     # Character title; large serif English and a clear CJK fallback.
     name = str(name or 'Unnamed')
     english = all(ord(ch)<128 for ch in name)
@@ -94,20 +93,20 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     def stat(y, symbol, label, value, maximum):
         x=91
         d.text((x,y),symbol,font=font(43,'sans'),fill=pale)
-        d.text((170,y),label,font=font(31),fill=(245,237,248))
+        d.text((170,y-15),label,font=font(31),fill=(245,237,248))
         maximum=max(1,int(maximum))
-        d.text((287,y+4),f'{value} / {maximum}',font=font(27,'sans'),fill=pale)
-        d.rounded_rectangle((171,y+20,716,y+40),radius=11,fill=(48,44,59),outline=muted,width=2)
+        d.text((287,y-10),f'{value} / {maximum}',font=font(27,'sans'),fill=pale)
+        d.rounded_rectangle((171,y+30,716,y+50),radius=11,fill=(48,44,59),outline=muted,width=2)
         ratio=max(0,min(float(value)/maximum,1))
         if ratio>0:
             width=max(9,round(541*ratio))
-            d.rounded_rectangle((173,y+22,173+width,y+38),radius=9,fill=pale)
+            d.rounded_rectangle((173,y+32,173+width,y+48),radius=9,fill=pale)
 
     stat(500,'♡','好感度',int(affection),100)
     stat(600,'☁','心情',int(mood),100)
     stat(700,'✧','EXP',int(exp)%100,100)
     # Portrait panel.
-    frame=(730,140,1544,800)
+    frame=(730,140,1535,800)
     d.rounded_rectangle((frame[0]-3,frame[1]-3,frame[2]+3,frame[3]+3),radius=20,outline=pale,width=4)
     box=(frame[2]-frame[0],frame[3]-frame[1])
     if portrait:
@@ -124,9 +123,8 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     # Bottom owner strip.
     d.line((70,827,1530,827),fill=muted,width=2)
     owner = str(owner or '未知')
-    d.text((93,850),'●',font=font(32,'sans'),fill=pale)
     label='擁有者：'+owner
-    d.text((165,852),label,font=fitted_font(d,label,1100,31,18),fill=pale)
+    d.text((150,855),label,font=fitted_font(d,label,1100,31,18),fill=pale)
     for x in (1430,1467,1504):
         d.polygon([(x,861),(x+8,873),(x+20,879),(x+8,885),(x,897),(x-8,885),(x-20,879),(x-8,873)],fill=pale)
     out=io.BytesIO()
