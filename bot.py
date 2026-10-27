@@ -75,10 +75,17 @@ def make_embed(text, character=None):
     )
 
     if character:
-        embed.set_author(
-            name=character['name'],
-            icon_url=character['image_url'] or None
-        )
+        name = character['name']
+        image_url = character['image_url']
+
+        if image_url and image_url.startswith('https://'):
+            embed.set_author(name=name, icon_url=image_url)
+        else:
+            embed.set_author(name=name)
+            log.warning(
+                'Character %s has no valid image URL: %r',
+                character['id'], image_url
+            )
 
     return embed
 
@@ -323,7 +330,7 @@ async def respond(i, message, dm_message=None):
                       ON CONFLICT(character_id) DO UPDATE SET summary=right(memories.summary || ' ' || $2,1800),updated_at=now()''',c['id'],compact[:1200])
                     await conn.execute('DELETE FROM chat_messages WHERE id=ANY($1::bigint[])',[r['id'] for r in old])
     for offset in range(0, len(reply), 1900):
-        embed = make_embed(reply[offset:offset + 1900])
+        embed = make_embed(reply[offset:offset + 1900], c)
 
         if dm_message is not None:
             await dm_message.reply(embed=embed, mention_author=False)
