@@ -152,46 +152,31 @@ class EchoNest(commands.Bot):
 
 bot = EchoNest()
 
-# 允許伺服器安裝與使用者安裝
+# 保留 Guild Install 和 User Install
 bot.tree.allowed_installs = app_commands.AppInstallationType(
     guild=True,
     user=True
 )
 
-# 允許伺服器及 Bot 私訊使用指令
+# 允許伺服器、Bot 私訊及使用者安裝的私訊情境
 bot.tree.allowed_contexts = app_commands.AppCommandContext(
     guild=True,
     dm_channel=True,
-    private_channel=False
+    private_channel=True
 )
 
-# 檢查指令使用位置
+# 禁止在未安裝 EchoNest 的伺服器執行指令
 async def check_command_location(i: discord.Interaction):
-    # 私訊允許使用
     if i.guild_id is None:
         return True
 
-    # 伺服器必須已安裝 EchoNest
     if bot.get_guild(i.guild_id) is None:
         await say(i, '此伺服器尚未安裝 EchoNest。')
         return False
 
     return True
 
-# 套用到所有 Slash Commands
 bot.tree.interaction_check = check_command_location
-
-
-bot.tree.allowed_contexts = app_commands.AppCommandContext(
-    guild=True,
-    dm_channel=True,
-    private_channel=False
-)
-
-bot.tree.allowed_installs = app_commands.AppInstallationType(
-    guild=True,
-    user=False
-)
 
 async def say(i,text,private=True):
     if i.response.is_done():await i.followup.send(text[:1900],ephemeral=private)
@@ -695,3 +680,12 @@ if __name__=='__main__':
     if not all((config.DISCORD_TOKEN,config.DATABASE_URL,config.GEMINI_API_KEY)):
         raise RuntimeError('Missing DISCORD_TOKEN, DATABASE_URL or GEMINI_API_KEY')
     bot.run(config.DISCORD_TOKEN,log_handler=None)
+
+if __name__ == "__main__":
+    print("Guild Install:", bot.tree.allowed_installs.guild)
+    print("User Install:", bot.tree.allowed_installs.user)
+    print("Guild Context:", bot.tree.allowed_contexts.guild)
+    print("DM Context:", bot.tree.allowed_contexts.dm_channel)
+    print("Private Context:", bot.tree.allowed_contexts.private_channel)
+
+    bot.run(config.DISCORD_TOKEN)
