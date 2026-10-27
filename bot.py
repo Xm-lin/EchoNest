@@ -219,7 +219,7 @@ async def status(i:discord.Interaction):
     await i.followup.send(file=discord.File(card,filename='character.png'),ephemeral=True)
 
 async def respond(i,message):
-    if not 1<=len(message.strip())<=1000:return await say(i,'訊息長度需為 1～1000 字。')
+    if not 1<=len(message.strip())<=1000:return await say(i,'訊息長度需為 1～20字。')
     await i.response.defer(thinking=True)
     c=await selected(i)
     if not c:return await say(i,'請先建立或切換角色。')
@@ -396,8 +396,10 @@ Character context: {character['name'][:30]}, {character['personality'][:50]}.
 
 QUALITY: Beautiful expressive eyes, meticulously rendered hair, sophisticated muted
 color harmony, soft cinematic lighting, delicate rim light, atmospheric background,
-professional finish appropriate to selected medium. imprtant! Preserve all described character,
+professional finish appropriate to selected medium. 
+imprtant! Preserve all described character,
 style and action;One character, no text, logos, watermarks, extra limbs or distorted face.
+the number of fingers must be 5 ans 5
 """.strip()[:1500]
 
 class ImageConfirmView(discord.ui.View):
