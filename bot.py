@@ -372,7 +372,10 @@ async def fetch_portrait(url):
 async def status(i:discord.Interaction):
     await i.response.defer(thinking=True,ephemeral=True)
     c=await selected(i)
-    if not c:return await say(i,'請先建立或切換角色。')
+    if not c:
+        if dm_message is not None:
+            return  # DM 沒有有效角色時，不回覆任何訊息
+        return await say(i,'請先建立或切換角色。')
     aff=await bot.pool.fetchval('SELECT points FROM affection WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id) or 0
     progress=await bot.pool.fetchrow('SELECT level,exp,mood FROM player_progress WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id)
     level,exp,mood=(progress['level'],progress['exp'],progress['mood']) if progress else (1,0,70)
@@ -459,6 +462,10 @@ async def respond(i, message, dm_message=None):
             await bot.pool.execute('''INSERT INTO player_memories(character_id,user_id,summary) VALUES($1,$2,$3)
                 ON CONFLICT(character_id,user_id) DO UPDATE SET summary=$3,updated_at=now()''',c['id'],i.user.id,summary_text[:1800])
         except Exception:log.exception('Memory summary failed')
+    # AI 回覆完成後，再確認角色仍存在且仍是目前選擇的角色
+    current = await selected(i)
+    if not current or current['id'] != c['id']:
+        return
     for offset in range(0, len(reply), 1900):
         embed = make_embed(reply[offset:offset + 1900], c)
 
