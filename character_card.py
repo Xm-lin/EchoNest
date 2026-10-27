@@ -84,7 +84,7 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     tag_font = fitted_font(d,personality,260,32,20)
     tag_w = min(310,max(170,d.textbbox((0,0),personality,font=tag_font)[2]+56))
     d.rounded_rectangle((84,tag_y,84+tag_w,tag_y+57),radius=9,outline=pale,width=2)
-    d.text((110,tag_y+8),personality,font=tag_font,fill=(245,235,249))
+    d.text((135,tag_y+6),personality,font=tag_font,fill=(245,235,249))
     # Section break.
     d.line((88,395,723,395),fill=muted,width=2)
     d.polygon([(84,395),(96,383),(108,395),(96,407)],fill=pale)
@@ -106,7 +106,7 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     stat(604,'☁','心情',int(mood),100)
     stat(706,'✧','EXP',int(exp)%100,100)
     # Portrait panel.
-    frame=(782,88,1544,805)
+    frame=(730,120,1544,800)
     d.rounded_rectangle((frame[0]-3,frame[1]-3,frame[2]+3,frame[3]+3),radius=20,outline=pale,width=4)
     box=(frame[2]-frame[0],frame[3]-frame[1])
     if portrait:
@@ -132,3 +132,38 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     im.save(out,'PNG')
     out.seek(0)
     return out
+
+
+if __name__ == "__main__":
+    # 測試資料，可以自行修改
+    NAME = "Niko"
+    PERSONALITY = "傲嬌"
+    OWNER = "小林"
+    MOOD = 70
+    AFFECTION = 45
+    LEVEL = 1
+    EXP = 35
+
+    # 角色圖片，放在同一個資料夾
+    IMAGE_PATH = "portrait.png"
+
+    portrait = None
+    if os.path.isfile(IMAGE_PATH):
+        with open(IMAGE_PATH, "rb") as f:
+            portrait = f.read()
+
+    result = render_card(
+        name=NAME,
+        personality=PERSONALITY,
+        owner=OWNER,
+        mood=MOOD,
+        affection=AFFECTION,
+        level=LEVEL,
+        exp=EXP,
+        portrait=portrait,
+    )
+
+    with open("card_preview.png", "wb") as f:
+        f.write(result.getvalue())
+
+    print("已產生 card_preview.png")
