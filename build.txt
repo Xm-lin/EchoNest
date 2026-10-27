@@ -136,3 +136,18 @@ Supabase 失敗：檢查 DATABASE_URL、SQL 初始化、資料庫網路與權限
 
 重要：這份專案未連接你的真實 Discord、Gemini、Supabase、Render 憑證執行端到端測試。
 正式上線前，請完成上述驗收；不得將未測試功能視為已驗證穩定。
+
+13. 既有 Supabase 資料庫修復（本專案專用）
+------------------------------
+若 Render 出現 relation "chat_settings" does not exist 或 characters.id 不存在：
+1. 先備份資料庫，並確認連接的是正確的 Supabase 專案。
+2. 在 Supabase SQL Editor 執行 database/migrations/repair_existing_supabase.sql 全部內容。
+3. 此腳本會將不相容的舊 characters 表改名為 echonest_legacy_characters，
+   然後建立目前程式需要的新資料表。原有 bot_*、profiles、messages、memories 等表不會刪除。
+4. 注意：舊角色、玩家資料、聊天紀錄會保留在舊表，但不會自動轉移到新系統，
+   因為舊表的主鍵及角色關聯與新架構不同。新系統初次使用時角色清單可能為空。
+   若需沿用舊資料，應另行規劃經驗證的資料遷移與 ID 對照。
+5. Discord Developer Portal > Bot > Privileged Gateway Intents：
+   啟用 Server Members Intent 與 Message Content Intent（本程式兩者皆要求）。
+6. 重新部署 Render，檢查 Logs 並測試建立角色、聊天與簽到。
+切勿使用 DROP TABLE、TRUNCATE 或強制覆蓋正式資料。

@@ -55,6 +55,16 @@ class Service:
         self.db = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=5, command_timeout=35)
         async with self.db.acquire() as conn:
             await conn.fetchval('SELECT 1')
+            # Fail fast on an incompatible schema instead of starting broken background loops.
+            required = {'characters': {'id', 'scope_type', 'scope_id', 'status', 'created_at'},
+                        'chat_settings': {'user_id', 'enabled', 'frequency'},
+                        'selected_characters': {'character_id', 'user_id'},
+                        'chat_messages': {'character_id', 'content'},
+                        'affection': {'character_id', 'user_id'}}
+            for table, columns in required.items():
+                actual = set(await conn.fetchval("SELECT array_agg(column_name) FROM information_schema.columns WHERE table_schema='public' AND table_name=$1", table) or [])
+                if not columns.issubset(actual):
+                    raise RuntimeError(f'Database schema mismatch for {table}: missing {sorted(columns - actual)}. See build.txt section 13.')
         self.worker_task = asyncio.create_task(self.worker(),name='ai-worker')
         self.scheduler_task = asyncio.create_task(self.scheduler(),name='proactive-scheduler')
         self.maintenance_task = asyncio.create_task(self.maintenance(),name='memory-maintenance')
