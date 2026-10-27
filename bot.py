@@ -138,7 +138,7 @@ class EchoNest(commands.Bot):
                         try:
                             async with self.ai_lock:
                                 msg=await generate(config.GEMINI_API_KEY,config.GEMINI_MODEL,
-                                  character_prompt(c),[{'role':'user','content':'請自然地發一句簡短的問候，不要假裝有真實身體。'}])
+                                  character_prompt(c),[{'role':'user','content':'根據過去的紀錄，隨便開個話題，或者接續最後對話'}])
                             msg=msg.strip()[:20]
                             user=await self.fetch_user(r['user_id'])
                             await user.send(embed=make_embed(f'**{c["name"]}**\n{msg}'))
