@@ -439,7 +439,7 @@ async def respond(i, message, dm_message=None):
                   WHEN affection.last_reward_at>now()-interval '60 seconds' THEN 0 ELSE 1 END,
                   reward_count=CASE WHEN affection.reward_day=$3 THEN affection.reward_count+1 ELSE 1 END,
                   reward_day=$3,last_reward_at=now()''',c['id'],i.user.id,day())
-                await conn.execute('''INSERT INTO player_progress(character_id,user_id,exp,level) VALUES($1,$2,1,1) ON CONFLICT(character_id,user_id) DO UPDATE SET exp=player_progress.exp+1,level=1+((player_progress.exp+1)/100)''',c['id'],i.user.id)
+                await conn.execute('''INSERT INTO player_progress(character_id,user_id,exp,level) VALUES($1,$2,1,1) ON CONFLICT(character_id,user_id) DO UPDATE SET exp=player_progress.exp+5,level=1+((player_progress.exp+1)/100)''',c['id'],i.user.id)
                 if not i.guild_id:
                     await conn.execute('''INSERT INTO chat_settings(user_id,last_chat_at,unanswered) VALUES($1,now(),0)
                       ON CONFLICT(user_id) DO UPDATE SET last_chat_at=now(),unanswered=0''',i.user.id)
