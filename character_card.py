@@ -79,11 +79,12 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     d.text((84,116),name,font=title,fill=(246,234,250),stroke_width=0)
     name_bottom = d.textbbox((84,116),name,font=title)[3]
     tag_y = max(292,min(335,name_bottom+12))
+    tag_y = tag_y+15
     personality = str(personality or '未設定')
     tag_font = fitted_font(d,personality,260,32,20)
     tag_w = min(310,max(170,d.textbbox((0,0),personality,font=tag_font)[2]+56))
     d.rounded_rectangle((84,tag_y,84+tag_w,tag_y+57),radius=9,outline=pale,width=2)
-    d.text((135,tag_y+6),personality,font=tag_font,fill=(245,235,249))
+    d.text((136,tag_y+7),personality,font=tag_font,fill=(245,235,249))
     # Section break.
     d.line((88,395,723,395),fill=muted,width=2)
     d.polygon([(84,395),(96,383),(108,395),(96,407)],fill=pale)
@@ -96,15 +97,15 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
         d.text((170,y-5),label,font=font(31),fill=(245,237,248))
         maximum=max(1,int(maximum))
         d.text((287,y-4),f'{value} / {maximum}',font=font(27,'sans'),fill=pale)
-        d.rounded_rectangle((171,y+35,716,y+55),radius=11,fill=(48,44,59),outline=muted,width=2)
+        d.rounded_rectangle((171,y+45,716,y+65),radius=11,fill=(48,44,59),outline=muted,width=2)
         ratio=max(0,min(float(value)/maximum,1))
         if ratio>0:
             width=max(9,round(541*ratio))
-            d.rounded_rectangle((173,y+37,173+width,y+53),radius=9,fill=pale)
+            d.rounded_rectangle((173,y+49,173+width,y+62),radius=9,fill=pale)
 
-    stat(500,'♡','好感度',int(affection),100)
-    stat(600,'☁','心情',int(mood),100)
-    stat(700,'✧','EXP',int(exp)%100,100)
+    stat(510,'♡','好感度',int(affection),100)
+    stat(610,'☁','心情',int(mood),100)
+    stat(710,'✧','EXP',int(exp)%100,100)
     # Portrait panel.
     frame=(730,140,1535,800)
     d.rounded_rectangle((frame[0]-3,frame[1]-3,frame[2]+3,frame[3]+3),radius=20,outline=pale,width=4)
