@@ -86,26 +86,23 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     d.rounded_rectangle((84,tag_y,84+tag_w,tag_y+57),radius=9,outline=pale,width=2)
     d.text((136,tag_y+7),personality,font=tag_font,fill=(245,235,249))
     # Section break.
-    d.line((88,395,723,395),fill=muted,width=2)
+    d.line((88,395,710,395),fill=muted,width=2)
     d.polygon([(84,395),(96,383),(108,395),(96,407)],fill=pale)
     d.text((92,425),'等級',font=font(39),fill=(235,224,240))
-    d.text((225,390),str(level),font=font(94,'number'),fill=(245,231,249))
-    d.line((330,466,399,466),fill=muted,width=2)
-    def stat(y, symbol, label, value, maximum):
-        x=91
-        d.text((x,y),symbol,font=font(43,'sans'),fill=pale)
-        d.text((170,y-5),label,font=font(31),fill=(245,237,248))
+    d.text((225,410),str(level),font=font(94,'number'),fill=(245,231,249))
+    def stat(y, label, value, maximum):
+        d.text((100,y-5),label,font=font(31),fill=(245,237,248))
         maximum=max(1,int(maximum))
-        d.text((287,y-4),f'{value} / {maximum}',font=font(27,'sans'),fill=pale)
-        d.rounded_rectangle((171,y+45,716,y+65),radius=11,fill=(48,44,59),outline=muted,width=2)
+        d.text((205,y+5),f'{value} / {maximum}',font=font(27,'sans'),fill=pale)
+        d.rounded_rectangle((100,y+50,700,y+70),radius=11,fill=(48,44,59),outline=muted,width=2)
         ratio=max(0,min(float(value)/maximum,1))
         if ratio>0:
-            width=max(9,round(541*ratio))
-            d.rounded_rectangle((173,y+49,173+width,y+62),radius=9,fill=pale)
+            width=max(9,round(523*ratio))
+            d.rounded_rectangle((103,y+54,173+width,y+67),radius=9,fill=pale)
 
-    stat(510,'♡','好感度',int(affection),100)
-    stat(610,'☁','心情',int(mood),100)
-    stat(710,'✧','EXP',int(exp)%100,100)
+    stat(510,'好感度',int(affection),100)
+    stat(610,'心情',int(mood),100)
+    stat(710,'EXP',int(exp)%100,100)
     # Portrait panel.
     frame=(730,140,1535,800)
     d.rounded_rectangle((frame[0]-3,frame[1]-3,frame[2]+3,frame[3]+3),radius=20,outline=pale,width=4)
@@ -137,10 +134,10 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
 if __name__ == "__main__":
     # 測試資料，可以自行修改
     NAME = "Niko"
-    PERSONALITY = "傲嬌"
+    PERSONALITY = "搞笑"
     OWNER = "小林"
-    MOOD = 70
-    AFFECTION = 45
+    MOOD = 100
+    AFFECTION = 100
     LEVEL = 1
     EXP = 35
 
