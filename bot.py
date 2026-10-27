@@ -152,6 +152,17 @@ class EchoNest(commands.Bot):
 
 bot=EchoNest()
 
+bot.tree.allowed_contexts = app_commands.AppCommandContext(
+    guild=True,
+    dm_channel=True,
+    private_channel=False
+)
+
+bot.tree.allowed_installs = app_commands.AppInstallationType(
+    guild=True,
+    user=False
+)
+
 async def say(i,text,private=True):
     if i.response.is_done():await i.followup.send(text[:1900],ephemeral=private)
     else:await i.response.send_message(text[:1900],ephemeral=private)
