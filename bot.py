@@ -397,8 +397,7 @@ Character context: {character['name'][:30]}, {character['personality'][:50]}.
 QUALITY: Beautiful expressive eyes, meticulously rendered hair, sophisticated muted
 color harmony, soft cinematic lighting, delicate rim light, atmospheric background,
 professional finish appropriate to selected medium. Preserve described character,
-style and action; adapt body actions to facial expression and head angle without zooming out.
-One character, no text, logos, watermarks, extra limbs or distorted face.
+style and action;One character, no text, logos, watermarks, extra limbs or distorted face.
 """.strip()[:1500]
 
 class ImageConfirmView(discord.ui.View):

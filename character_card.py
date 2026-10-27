@@ -84,7 +84,7 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     tag_font = fitted_font(d,personality,260,32,20)
     tag_w = min(310,max(170,d.textbbox((0,0),personality,font=tag_font)[2]+56))
     d.rounded_rectangle((84,tag_y,84+tag_w,tag_y+57),radius=9,outline=pale,width=2)
-    d.text((136,tag_y+5),personality,font=tag_font,fill=(245,235,249))
+    d.text((136,tag_y+4),personality,font=tag_font,fill=(245,235,249))
     # Section break.
     d.line((88,395,710,395),fill=muted,width=2)
     d.polygon([(84,395),(96,383),(108,395),(96,407)],fill=pale)
