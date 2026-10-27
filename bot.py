@@ -355,24 +355,40 @@ async def collection(i:discord.Interaction):
     rows=await bot.pool.fetch('SELECT key FROM collections WHERE scope_type=$1 AND scope_id=$2 AND user_id=$3',kind,sid,i.user.id)
     await say(i,'\n'.join(r['key'] for r in rows) or '尚無收藏。')
 
+# All styles share the same intimate, face-dominant composition.
+# Style only changes the rendering medium, never the camera distance.
 IMAGE_STYLES = {
-    'anime': 'Japanese anime character portrait, clean line art, expressive eyes, detailed cel shading',
-    'realistic': 'Photorealistic cinematic character portrait, natural lighting, detailed skin and hair',
-    'illustration': 'High-quality digital character illustration, painterly lighting, rich colors',
-    'watercolor': 'Soft watercolor character portrait on textured paper, delicate brushwork',
-    'pixel': 'Detailed pixel art character portrait, crisp pixels, retro game aesthetic',
-    'chibi': 'Cute chibi character illustration, stylized proportions, colorful and friendly',
-    'fantasy': 'Fantasy RPG character concept art, intricate costume and magical atmosphere',
-    'comic': 'Modern comic book character art, strong ink lines, dynamic shading',
+    'anime': 'High-end Japanese anime key visual, exquisitely detailed 2D character portrait, fine clean linework, luminous multi-layered irises, individually rendered wisps of hair, subtle blush, elegant cel-and-soft shading, muted dusty rose and lavender tones, cinematic dusk lighting, gentle rim light, dreamy atmospheric depth, carefully controlled highlights, expressive natural face; not generic flat anime art',
+    'realistic': 'Fine-art photographic portrait, believable natural skin texture, detailed eyelashes and hair strands, soulful eyes with realistic catchlights, subtle color grading in muted mauve and warm amber, cinematic window light, gentle shadows, shallow depth of field, intimate and atmospheric; avoid glossy beauty-ad retouching',
+    'illustration': 'Luxury hand-painted digital character illustration, delicate textured brush strokes, intricate eye detail, flowing individual hair strands, painterly but anatomically coherent face, soft layered shadows, refined pastel-violet and warm dusk palette, cinematic lighting and tasteful atmospheric depth, polished art-book quality',
+    'watercolor': 'Exquisite fine-art watercolor portrait on lightly textured paper, translucent layered washes, delicate dry-brush hair details, carefully painted expressive eyes and fine facial features, soft mauve and peach pigments, gentle warm backlight suggested through watercolor blooms, refined hand-painted finish; preserve sharp focal details in the face',
+    'pixel': 'Premium high-resolution pixel-art character portrait, intentional hand-placed pixel clusters, intricate pixel-shaded eyes and hair, coherent limited dusty-lavender and amber palette, atmospheric pixel lighting, beautiful pixel-art depth and clean crisp edges, art-directed retro-game character close-up; no blur or smooth 3D rendering',
+    'chibi': 'Premium Japanese chibi character portrait, cute rounded facial proportions, large intricately highlighted eyes, layered soft hair tufts, delicate blush, elegant clean linework, subtle soft shading, muted pastel purple and warm pink colors, atmospheric warm lighting, carefully polished 2D illustration; head fills frame, not a full-body mascot',
+    'fantasy': 'Masterfully painted fantasy character portrait, ethereal atmosphere, expressive richly detailed eyes, intricately rendered hair, restrained fantasy ornaments only if consistent with character description, soft magical rim light, painterly cinematic shadows, muted violet and dusk-rose color grading, refined fantasy art-book finish',
+    'comic': 'High-end illustrated comic-book character close-up, confident precise ink lines, nuanced facial acting, detailed expressive eyes and layered hair, sophisticated controlled cel shading with gentle gradients, restrained mauve-and-amber cinematic palette, dramatic yet soft lighting, atmospheric background, premium graphic-novel cover quality',
 }
 
-def portrait_prompt(character, appearance, style):
+def portrait_prompt(character, appearance, style, action):
+    """Keep composition and style within the provider's 1500-char prompt limit."""
     visual = IMAGE_STYLES.get(style, IMAGE_STYLES['illustration'])
-    return (f'Original fictional character, {visual}. '
-            f'Single character portrait, no text, no watermark, suitable for all ages. '
-            f'Character name: {character["name"][:40]}. '
-            f'Personality: {character["personality"][:100]}. '
-            f'Appearance: {appearance.strip()[:700]}')
+    return f"""Premium original fictional character portrait. Extreme close-up head-and-neck portrait.
+UNIVERSAL FRAMING FOR EVERY STYLE: Intimate cinematic portrait, camera close to face,
+face fills 65-80% of square image, head and hair fully in frame, neck visible,
+shoulders barely visible. This close camera framing MUST remain identical across
+all eight styles. no full-body, no half-body, no waist-up, no distant camera, no wide shot.
+
+ART STYLE: {visual}
+
+CHARACTER: {appearance.strip()[:350]}
+POSE AND ACTION: {action.strip()[:160]}
+Character context: {character['name'][:30]}, {character['personality'][:50]}.
+
+QUALITY: Beautiful expressive eyes, meticulously rendered hair, sophisticated muted
+color harmony, soft cinematic lighting, delicate rim light, atmospheric background,
+professional finish appropriate to selected medium. Preserve described character,
+style and action; adapt body actions to facial expression and head angle without zooming out.
+One character, no text, logos, watermarks, extra limbs or distorted face.
+""".strip()[:1500]
 
 class ImageConfirmView(discord.ui.View):
     def __init__(self, character_id, owner_id, image_bytes, prompt):
@@ -437,8 +453,8 @@ class ImageConfirmView(discord.ui.View):
         self.stop()
         await interaction.response.edit_message(content='已取消，原角色圖片不變。', attachments=[], view=None)
 
-@bot.tree.command(name='生成角色圖片', description='選擇風格，使用 Agnes AI 生成角色圖片')
-@app_commands.describe(外觀描述='描述角色的外觀、服裝、髮色等', 風格='選擇圖片風格')
+@bot.tree.command(name='生成角色圖片', description='填寫人物形容、風格與動作，使用 Agnes AI 生成近距離角色頭像')
+@app_commands.describe(人物形容='髮色、眼睛、髮型、配件等外觀', 風格='選擇圖片風格', 動作='表情、頭部角度、姿勢等')
 @app_commands.choices(風格=[
     app_commands.Choice(name='日系動漫', value='anime'),
     app_commands.Choice(name='寫實人像', value='realistic'),
@@ -449,9 +465,11 @@ class ImageConfirmView(discord.ui.View):
     app_commands.Choice(name='奇幻角色', value='fantasy'),
     app_commands.Choice(name='漫畫風格', value='comic'),
 ])
-async def character_image(i:discord.Interaction, 外觀描述:str, 風格:app_commands.Choice[str]):
-    if not 1 <= len(外觀描述.strip()) <= 700:
-        return await say(i, '外觀描述需為 1～700 字。')
+async def character_image(i:discord.Interaction, 人物形容:str, 風格:app_commands.Choice[str], 動作:str):
+    if not 1 <= len(人物形容.strip()) <= 700:
+        return await say(i, '人物形容需為 1～700 字。')
+    if not 1 <= len(動作.strip()) <= 350:
+        return await say(i, '動作需為 1～350 字。')
     await i.response.defer(thinking=True, ephemeral=True)
     c = await selected(i)
     if not c:
@@ -459,7 +477,7 @@ async def character_image(i:discord.Interaction, 外觀描述:str, 風格:app_co
     if c['owner_id'] != i.user.id:
         return await say(i, '只有角色建立者可以生成角色圖片。')
     try:
-        prompt = portrait_prompt(c, 外觀描述, 風格.value)
+        prompt = portrait_prompt(c, 人物形容, 風格.value, 動作)
         async with bot.ai_lock:
             data = await create_image(prompt)
         view = ImageConfirmView(c['id'], i.user.id, data, prompt)
