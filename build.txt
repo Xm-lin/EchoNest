@@ -1,93 +1,40 @@
-EchoNest 部署說明
-============================
+EchoNest 開發與部署說明
+======================
 
-請照順序操作。這是一套全新專案，不要將舊 EchoNest 程式或舊資料庫 SQL 混入。
+1. 使用 Python 3.12。安裝：pip install -r requirements.txt
+2. 複製 .env.example 為 .env，填入 DISCORD_TOKEN、DATABASE_URL、GEMINI_API_KEY。
+3. 在 Supabase 新專案 SQL Editor 執行 database/schema.sql。
+4. 已有資料庫時，請先備份並人工比較資料表差異，不要直接刪表。
+   本版需要 characters.image_url、chat_settings.unanswered、explorations、important_memories。
+   如既有資料庫是上一份 EchoNest schema，備份後可檢查並執行 database/upgrade_existing.sql。
+5. Supabase Storage 建立 public bucket，名稱 character-images（或調整環境變數）。
+   圖片由伺服器使用 service_role key 上傳，絕對不要放到前端或 GitHub。
+6. 圖片 API：IMAGE_API_URL、IMAGE_API_KEY、IMAGE_MODEL。
+   目前圖片介面是通用 JSON 格式：POST {model,prompt}，Bearer 認證，
+   預期回傳 data[0].url / images[0].url 或 base64。
+   Agnes AI 的真實端點、請求及回應格式尚未驗證；需依官方文件調整 images.py。
+   如使用其他服務商，須檢查圖片來源網域允許清單。
+7. Discord Developer Portal：開啟 Server Members Intent，邀請時授權 bot 與 applications.commands。
+   需 Send Messages、Embed Links、Attach Files 權限。普通訊息不會觸發聊天。
+8. 本機啟動：python bot.py。測試：python -m unittest discover -s tests
+9. Docker：docker compose up --build
+10. Render：Web Service / Docker。Health Check Path 設為 /health。
+    Render 自動提供 PORT；程式監聽 0.0.0.0。若免費方案休眠，Discord 連線也會中斷。
+11. 檢查 Logs：HTTP health server started、Database verified and Discord commands synchronized、Gateway connected。
+12. 驗收：建立角色、切換角色、聊天、狀態卡、圖片上傳、簽到、探索、任務、送禮、刪除角色。
+13. 先在 Render 設定 IMAGE_API_KEY、IMAGE_API_URL、IMAGE_MODEL 與 SUPABASE_URL、SUPABASE_SERVICE_ROLE_KEY。
+    IMAGE_API_URL=https://apihub.agnes-ai.com/v1/images/generations
+    IMAGE_MODEL=agnes-image-2.1-flash
+    Supabase Storage 需建立公開 character-images bucket。
+14. 如果資料庫報 tenant/user not found，請重新複製目前 Supabase 專案的 Session Pooler URI。
+15. 不要同時啟動多個使用相同 Token 的機器人實例；排程與任務目前不具備跨實例去重保證。
 
-步驟 1：建立新的 Supabase 專案
-----------------------------
-1. 到 https://supabase.com/ 建立全新專案。
-2. 開啟 SQL Editor。
-3. 將 database/schema.sql 全部貼入並執行。
-4. 確認 SQL 沒有錯誤。這份 SQL 包含 characters、chat_settings 等必要資料表。
-5. 到 Project Settings > Database 取得 PostgreSQL 連線字串。
-6. 連線字串放入 DATABASE_URL；若使用連線池，請選擇 Supabase 支援 asyncpg 的連線模式，並確認 IPv4/IPv6 連線能力。
-7. 不要將密碼貼到聊天或 GitHub。
-
-步驟 2：建立 Discord Application
-----------------------------
-1. 到 https://discord.com/developers/applications 建立 Application。
-2. 到 Bot 頁面取得 Token。
-3. 在 Privileged Gateway Intents 開啟 SERVER MEMBERS INTENT 和 MESSAGE CONTENT INTENT。
-   程式需要前者偵測建立者離開伺服器，後者處理 DM 直接聊天。
-4. 在 Installation 設定 Guild Install，授權 bot 和 applications.commands。
-5. 建議 Bot 權限為 View Channels、Send Messages、Embed Links。
-6. 將 Bot 安裝到自己的測試伺服器。
-
-步驟 3：Gemini
-----------------------------
-1. 到 https://aistudio.google.com/ 取得 Gemini API Key。
-2. 將 GEMINI_API_KEY 放入環境變數。
-3. GEMINI_MODEL 預設 gemini-2.5-flash，若帳號無法使用，改成實際可用的模型。
-
-步驟 4：本機測試（Windows PowerShell）
-----------------------------
-1. 解壓縮專案，開啟專案資料夾。
-2. 執行：python -m venv .venv
-3. 執行：.venv\Scripts\Activate.ps1
-4. 執行：pip install -r requirements.txt
-5. 複製 .env.example 為 .env，填入 DISCORD_TOKEN、DATABASE_URL、GEMINI_API_KEY。
-6. 執行：python bot.py
-7. 看到 Database verified and Discord commands synchronized 才算通過第一階段。
-8. 測試 /建立角色、/角色列表、/聊天、/簽到、/背包。
-
-步驟 5：Docker
-----------------------------
-1. 確保 Docker Desktop 正常執行。
-2. 執行：docker compose up --build
-3. 在終端檢查日誌。
-4. Docker 不會建立本機資料庫，所有持久資料存在 Supabase。
-
-步驟 6：GitHub
-----------------------------
-1. 在 GitHub 建立全新的空白儲存庫，不要勾選 README、.gitignore 或 License。
-2. 在專案資料夾執行：
-   git init
-   git add .
-   git commit -m "Initial EchoNest project"
-   git branch -M main
-   git remote add origin https://github.com/你的帳號/EchoNest.git
-   git push -u origin main
-3. .env 已被 .gitignore 排除；推送前仍要用 git status 確認。
-4. 不要把新專案直接合併到舊的、已有其他架構程式碼的儲存庫。
-
-步驟 7：Render
-----------------------------
-1. Render 新建 Background Worker，連接新 GitHub 儲存庫。
-2. Runtime 選 Docker；使用 Dockerfile。
-3. 設定 DISCORD_TOKEN、DATABASE_URL、GEMINI_API_KEY、GEMINI_MODEL。
-4. 選擇能持續執行 Worker 的方案；Render 方案與費用以當時介面為準。
-5. 部署後查看 Logs。
-6. 若出現 Database schema mismatch，表示 SQL 沒執行在程式連線的資料庫，或使用了舊資料庫。
-7. 若出現 PrivilegedIntentsRequired，回 Discord Developer Portal 檢查 Intents。
-8. PyNaCl / davey 的語音警告不影響文字聊天。
-
-步驟 8：驗收
-----------------------------
-[ ] Discord Bot 能正常上線
-[ ] Supabase Schema 驗證成功
-[ ] 建立角色成功
-[ ] DM 與 Guild 角色分離
-[ ] Gemini 回覆正常
-[ ] 簽到不可重複領取
-[ ] 送禮不會造成背包負數
-[ ] 刪除角色後關聯資料移除
-[ ] Render Logs 有錯誤堆疊，且不包含金鑰
-
-未完成功能：
-- 主動 DM 排程（目前只保存設定）
-- 完整 AI 記憶摘要與重要記憶檢索
-- Agens AI 圖片生成、確認與 Storage
-- 多回合探索、完整禮物與任務系統
-- 完整防刷、聊天額度與重試佇列
-
-請勿把本專案當作已完成所有規劃功能的正式營運版本。
+目前限制
+========
+- Agnes AI 介面尚未取得官方規格，無法保證圖片生成可直接使用。
+- 記憶摘要為截斷式歷史整理，非 LLM 產生的高品質長期摘要。
+- 重要記憶表已建立及可檢索，但沒有自動擷取的重要記憶寫入流程。
+- 探索是每日限次的隨機掉落，未實作多回合事件。
+- 禮物池目前 62 項。
+- 主動訊息為單實例週期掃描，沒有跨實例鎖與排程持久化保證。
+- 圖片生成提供確認與取消按鈕；按鈕逾時後需重新生成。

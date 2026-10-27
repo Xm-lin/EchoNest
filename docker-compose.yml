@@ -2,4 +2,5 @@ services:
   echonest:
     build: .
     env_file: .env
-    restart: unless-stopped
+    ports:
+      - "10000:10000"
