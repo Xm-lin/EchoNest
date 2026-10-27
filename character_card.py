@@ -106,7 +106,7 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     stat(604,'☁','心情',int(mood),100)
     stat(706,'✧','EXP',int(exp)%100,100)
     # Portrait panel.
-    frame=(730,120,1544,800)
+    frame=(730,140,1544,800)
     d.rounded_rectangle((frame[0]-3,frame[1]-3,frame[2]+3,frame[3]+3),radius=20,outline=pale,width=4)
     box=(frame[2]-frame[0],frame[3]-frame[1])
     if portrait:
