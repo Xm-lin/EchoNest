@@ -227,12 +227,21 @@ async def respond(i,message):
         history=await bot.pool.fetch('''SELECT role,content,user_id FROM chat_messages
           WHERE character_id=$1 ORDER BY id DESC LIMIT 20''',c['id'])
         turns=[{'role':r['role'],'content':(f'玩家 {r["user_id"]}: ' if r['role']=='user' else '')+r['content']} for r in reversed(history)]
-        turns.append({'role':'user','content':f'玩家 {i.user.id}: {message}'})
+        turns.append({'role':'user','content':f'{message}'})
         summary=await bot.pool.fetchval('SELECT summary FROM memories WHERE character_id=$1',c['id']) or ''
         query=message.lower()
         tags=await bot.pool.fetch('SELECT tag,content FROM important_memories WHERE character_id=$1 ORDER BY id DESC LIMIT 50',c['id'])
         matched=[r['content'] for r in tags if r['tag'].lower() in query][:3]
-        try:reply=await generate(config.GEMINI_API_KEY,config.GEMINI_MODEL,c['personality']+' '+c['description'],turns,summary+'\n'+'\n'.join(matched))
+        try:
+            reply = await generate(
+                config.GEMINI_API_KEY,
+                config.GEMINI_MODEL,
+                c['personality'] + ' ' + c['description']
+                + '\n請使用繁體中文回覆，每次回覆不得超過20個字（包含標點符號）。保持角色性格，回答自然簡短。',
+                turns,
+                summary + '\n' + '\n'.join(matched)
+            )
+            reply = reply.strip()[:20]
         except Exception:
             log.exception('Chat failed character=%s',c['id']);return await say(i,'AI 暫時無法回覆。')
         async with bot.pool.acquire() as conn:
