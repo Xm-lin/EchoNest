@@ -150,7 +150,37 @@ class EchoNest(commands.Bot):
             except Exception:log.exception('Proactive loop failed')
             await asyncio.sleep(900)
 
-bot=EchoNest()
+bot = EchoNest()
+
+# 允許伺服器安裝與使用者安裝
+bot.tree.allowed_installs = app_commands.AppInstallationType(
+    guild=True,
+    user=True
+)
+
+# 允許伺服器及 Bot 私訊使用指令
+bot.tree.allowed_contexts = app_commands.AppCommandContext(
+    guild=True,
+    dm_channel=True,
+    private_channel=False
+)
+
+# 檢查指令使用位置
+async def check_command_location(i: discord.Interaction):
+    # 私訊允許使用
+    if i.guild_id is None:
+        return True
+
+    # 伺服器必須已安裝 EchoNest
+    if bot.get_guild(i.guild_id) is None:
+        await say(i, '此伺服器尚未安裝 EchoNest。')
+        return False
+
+    return True
+
+# 套用到所有 Slash Commands
+bot.tree.interaction_check = check_command_location
+
 
 bot.tree.allowed_contexts = app_commands.AppCommandContext(
     guild=True,
