@@ -68,7 +68,19 @@ GIFTS={'花束':3,'巧克力':4,'茶':2,'書':5,'玩偶':6,'餅乾':2,'明信片
 def day(): return datetime.now(TZ).date()
 def area(interaction): return ('guild',interaction.guild_id) if interaction.guild_id else ('dm',interaction.user.id)
 
-def make_embed(text): return discord.Embed(description=text[:3900],color=0x678bc3)
+def make_embed(text, character=None):
+    embed = discord.Embed(
+        description=text[:3900],
+        color=0x678bc3
+    )
+
+    if character:
+        embed.set_author(
+            name=character['name'],
+            icon_url=character['image_url'] or None
+        )
+
+    return embed
 
 class EchoNest(commands.Bot):
     def __init__(self):
