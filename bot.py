@@ -355,16 +355,36 @@ async def collection(i:discord.Interaction):
     rows=await bot.pool.fetch('SELECT key FROM collections WHERE scope_type=$1 AND scope_id=$2 AND user_id=$3',kind,sid,i.user.id)
     await say(i,'\n'.join(r['key'] for r in rows) or '尚無收藏。')
 
+IMAGE_STYLES = {
+    'anime': 'Japanese anime character portrait, clean line art, expressive eyes, detailed cel shading',
+    'realistic': 'Photorealistic cinematic character portrait, natural lighting, detailed skin and hair',
+    'illustration': 'High-quality digital character illustration, painterly lighting, rich colors',
+    'watercolor': 'Soft watercolor character portrait on textured paper, delicate brushwork',
+    'pixel': 'Detailed pixel art character portrait, crisp pixels, retro game aesthetic',
+    'chibi': 'Cute chibi character illustration, stylized proportions, colorful and friendly',
+    'fantasy': 'Fantasy RPG character concept art, intricate costume and magical atmosphere',
+    'comic': 'Modern comic book character art, strong ink lines, dynamic shading',
+}
+
+def portrait_prompt(character, appearance, style):
+    visual = IMAGE_STYLES.get(style, IMAGE_STYLES['illustration'])
+    return (f'Original fictional character, {visual}. '
+            f'Single character portrait, no text, no watermark, suitable for all ages. '
+            f'Character name: {character["name"][:40]}. '
+            f'Personality: {character["personality"][:100]}. '
+            f'Appearance: {appearance.strip()[:700]}')
+
 class ImageConfirmView(discord.ui.View):
-    def __init__(self, character_id, owner_id, image_bytes):
+    def __init__(self, character_id, owner_id, image_bytes, prompt):
         super().__init__(timeout=180)
         self.character_id = character_id
         self.owner_id = owner_id
         self.image_bytes = image_bytes
+        self.prompt = prompt
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
-            await say(interaction, '只有建立者可以確認圖片。')
+            await say(interaction, '只有建立者可以操作這張圖片。')
             return False
         return True
 
@@ -388,13 +408,48 @@ class ImageConfirmView(discord.ui.View):
         await interaction.edit_original_response(content='角色圖片已更新。', view=None)
         self.stop()
 
+    @discord.ui.button(label='重新生成', style=discord.ButtonStyle.primary)
+    async def regenerate(self, interaction, button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        kind, sid = area(interaction)
+        exists = await bot.pool.fetchval('''SELECT id FROM characters WHERE id=$1 AND owner_id=$2
+            AND scope_type=$3 AND scope_id=$4 AND status='active' ''',
+            self.character_id, interaction.user.id, kind, sid)
+        if not exists:
+            return await say(interaction, '角色不存在或已無權修改。')
+        try:
+            async with bot.ai_lock:
+                new_image = await create_image(self.prompt)
+            new_view = ImageConfirmView(self.character_id, self.owner_id, new_image, self.prompt)
+            await interaction.followup.send('已依照相同風格重新生成，確認後才會替換角色圖片。',
+                file=discord.File(io.BytesIO(new_image), filename='preview.png'),
+                view=new_view, ephemeral=True)
+            self.disable_all_items()
+            self.stop()
+        except ImageProviderError as exc:
+            await say(interaction, f'重新生成失敗：{exc}')
+        except Exception:
+            log.exception('Regenerate image failed')
+            await say(interaction, '重新生成失敗，請查看 Render Logs。')
+
     @discord.ui.button(label='取消', style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
         self.stop()
         await interaction.response.edit_message(content='已取消，原角色圖片不變。', attachments=[], view=None)
 
-@bot.tree.command(name='生成角色圖片', description='使用 Agnes AI 生成角色圖片，確認後儲存')
-async def character_image(i:discord.Interaction, 外觀描述:str):
+@bot.tree.command(name='生成角色圖片', description='選擇風格，使用 Agnes AI 生成角色圖片')
+@app_commands.describe(外觀描述='描述角色的外觀、服裝、髮色等', 風格='選擇圖片風格')
+@app_commands.choices(風格=[
+    app_commands.Choice(name='日系動漫', value='anime'),
+    app_commands.Choice(name='寫實人像', value='realistic'),
+    app_commands.Choice(name='精緻插畫', value='illustration'),
+    app_commands.Choice(name='水彩手繪', value='watercolor'),
+    app_commands.Choice(name='像素藝術', value='pixel'),
+    app_commands.Choice(name='Q版可愛', value='chibi'),
+    app_commands.Choice(name='奇幻角色', value='fantasy'),
+    app_commands.Choice(name='漫畫風格', value='comic'),
+])
+async def character_image(i:discord.Interaction, 外觀描述:str, 風格:app_commands.Choice[str]):
     if not 1 <= len(外觀描述.strip()) <= 700:
         return await say(i, '外觀描述需為 1～700 字。')
     await i.response.defer(thinking=True, ephemeral=True)
@@ -404,14 +459,11 @@ async def character_image(i:discord.Interaction, 外觀描述:str):
     if c['owner_id'] != i.user.id:
         return await say(i, '只有角色建立者可以生成角色圖片。')
     try:
-        prompt = (f'Original fictional character portrait, high-quality illustration, '
-                  f'no text, no watermark, non-sexual, suitable for all ages. '
-                  f'Character name: {c["name"][:40]}. Personality: {c["personality"][:100]}. '
-                  f'Appearance: {外觀描述.strip()}')
+        prompt = portrait_prompt(c, 外觀描述, 風格.value)
         async with bot.ai_lock:
             data = await create_image(prompt)
-        view = ImageConfirmView(c['id'], i.user.id, data)
-        await i.followup.send('圖片已生成。確認後才會取代原角色圖片。',
+        view = ImageConfirmView(c['id'], i.user.id, data, prompt)
+        await i.followup.send(f'圖片已生成（{風格.name}）。確認後才會取代原角色圖片。',
                               file=discord.File(io.BytesIO(data), filename='preview.png'),
                               view=view, ephemeral=True)
     except ImageProviderError as exc:
