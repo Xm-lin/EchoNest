@@ -310,8 +310,13 @@ async def respond(i, message, dm_message=None):
                     await conn.execute('''INSERT INTO memories(character_id,summary) VALUES($1,$2)
                       ON CONFLICT(character_id) DO UPDATE SET summary=right(memories.summary || ' ' || $2,1800),updated_at=now()''',c['id'],compact[:1200])
                     await conn.execute('DELETE FROM chat_messages WHERE id=ANY($1::bigint[])',[r['id'] for r in old])
-    for offset in range(0,len(reply),1900):
-        await i.followup.send(embed=make_embed(reply[offset:offset+1900]))
+    for offset in range(0, len(reply), 1900):
+        embed = make_embed(reply[offset:offset + 1900])
+
+        if dm_message is not None:
+            await dm_message.reply(embed=embed, mention_author=False)
+        else:
+            await i.followup.send(embed=embed)
 
 @bot.tree.command(name='聊天',description='與目前角色對話')
 async def chat(i:discord.Interaction,訊息:str):await respond(i,訊息)
