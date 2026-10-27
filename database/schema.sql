@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS characters (
  owner_id BIGINT NOT NULL,
  name TEXT NOT NULL CHECK(char_length(name) BETWEEN 1 AND 40),
  personality TEXT NOT NULL,
+ personality_description TEXT NOT NULL DEFAULT '',
  description TEXT NOT NULL DEFAULT '',
  image_url TEXT NOT NULL DEFAULT '',
  mood INTEGER NOT NULL DEFAULT 70 CHECK(mood BETWEEN 0 AND 100),
@@ -73,3 +74,4 @@ CREATE TABLE IF NOT EXISTS important_memories (
  tag TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_important_memories ON important_memories(character_id,id DESC);
+-- V12 independent-player additions (for new installs, run 003 then 004 after schema.sql)

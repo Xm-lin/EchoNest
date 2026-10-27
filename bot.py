@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import random
+import hashlib
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
@@ -34,26 +35,14 @@ PERSONALITY_PROMPTS = {
 
 def character_prompt(character):
     personality = character['personality']
-    preset = PERSONALITY_PROMPTS.get(personality, personality)
+    custom_description = character.get('personality_description', '') if isinstance(character, dict) else (character['personality_description'] if 'personality_description' in character.keys() else '')
+    preset = custom_description if custom_description else PERSONALITY_PROMPTS.get(personality, personality)
     return (f'角色名稱：{character["name"]}\n角色性格：{preset}\n'
             f'額外設定：{character["description"] or "無"}\n'
             '像真實聊天一樣自然回應，根據當下話題、情緒與對話歷史改變措辭。'
             '性格是傾向，不是固定台詞或口癖；避免反覆使用相同句型、結巴、動作括號或誇張語氣。'
             '優先回應玩家真正說的內容，不要每次都主動轉移話題。'
             '使用繁體中文，回覆最多20個字（含標點），盡量用完整的短句。')
-
-EXPLORATION_EVENTS = [
-    ('雨後小巷', '雨剛停，牆邊的積水映出一盞舊路燈。你順著微弱的光走去，在石階旁發現了{item}。'),
-    ('夜市轉角', '攤販正忙著收拾，風把一張紙條吹到你腳邊。你替老闆撿起來，他笑著送你{item}。'),
-    ('森林步道', '樹葉沙沙作響，前方傳來細小的碰撞聲。你撥開草叢，發現一件被落葉蓋住的{item}。'),
-    ('舊書店', '店裡的時鐘停在三點。你幫店主整理角落的紙箱，意外找到一件{item}，店主說可以送給你。'),
-    ('河岸長椅', '你在河邊停下腳步，看見有人匆匆離開時遺落了一個袋子。你交給巡邏人員後，獲得了{item}作為謝禮。'),
-    ('山頂觀景台', '雲層散開，遠方的城市逐漸亮起。你在觀景台旁的小攤完成一場猜謎，贏得了{item}。'),
-    ('安靜的車站', '末班車尚未到站，廣播忽然傳來失真的旋律。你幫忙找回遺失的行李，收到{item}作為感謝。'),
-    ('午後公園', '一隻小鳥停在告示牌上，旁邊正在舉辦小型交換市集。你用找到的代幣換得了{item}。'),
-    ('海邊燈塔', '潮聲一陣接著一陣，你沿著燈塔旁的階梯往上走。守塔人講完一段往事後，送你一件{item}。'),
-    ('古老鐘樓', '鐘聲響起時，一扇原本關著的小門慢慢打開。你完成守門人的簡單委託，拿到了{item}。'),
-]
 
 GIFTS={'花束':3,'巧克力':4,'茶':2,'書':5,'玩偶':6,'餅乾':2,'明信片':3,'音樂盒':8,
        '羽毛筆':3,'星星吊飾':5,'香氛蠟燭':5,'手作卡片':4,'玻璃珠':2,'木製書籤':3,
@@ -64,6 +53,11 @@ GIFTS={'花束':3,'巧克力':4,'茶':2,'書':5,'玩偶':6,'餅乾':2,'明信片
        '鬱金香':4,'向日葵':4,'滿天星':3,'乾燥花':4,'蝴蝶結':2,'手工皂':3,'香包':3,
        '陶瓷杯':4,'拼圖':5,'桌遊':6,'畫冊':5,'小說':4,'唱片':6,'耳機套':4,
        '徽章':3,'貼紙':2,'星空瓶':7,'迷你模型':6,'手作飾品':5,'紀念幣':4} 
+
+# Character preference is stable across players; no shared progression is stored.
+def gift_affection(character_id, item):
+    value=int.from_bytes(hashlib.sha256(f'{character_id}:{item}'.encode()).digest()[:2],'big')
+    return max(1,GIFTS[item]+(value%5)-2)
 
 def day(): return datetime.now(TZ).date()
 def area(interaction): return ('guild',interaction.guild_id) if interaction.guild_id else ('dm',interaction.user.id)
@@ -93,13 +87,13 @@ class EchoNest(commands.Bot):
     def __init__(self):
         intents=discord.Intents.default();intents.members=True;intents.message_content=True
         super().__init__(command_prefix='!',intents=intents,allowed_mentions=discord.AllowedMentions.none())
-        self.pool=None;self.ai_lock=asyncio.Lock();self.proactive_task=None
+        self.pool=None;self.ai_lock=asyncio.Lock();self.ai_waiting=0;self.proactive_task=None
 
     async def setup_hook(self):
         self.pool=await asyncpg.create_pool(config.DATABASE_URL,min_size=1,max_size=5,command_timeout=25)
-        required={'characters':{'id','image_url','mood','exp','level','owner_id'},
+        required={'characters':{'id','image_url','mood','exp','level','owner_id','access_mode'},
                   'chat_settings':{'unanswered','last_chat_at'},'explorations':{'count'},
-                  'important_memories':{'content'}}
+                  'important_memories':{'content','user_id'}, 'character_access':{'character_id','user_id'}, 'user_preferences':{'user_id','private_replies'}, 'player_progress':{'character_id','user_id','exp','level','mood'}, 'player_memories':{'character_id','user_id','summary'}, 'character_favorites':{'character_id','user_id'}}
         async with self.pool.acquire() as conn:
             for table,columns in required.items():
                 rows=await conn.fetch('SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2','public',table)
@@ -133,50 +127,79 @@ class EchoNest(commands.Bot):
                         if not c:continue
                         # Claim before sending, avoiding duplicates across worker iterations.
                         updated=await self.pool.fetchval('''UPDATE chat_settings SET last_proactive_at=now(),unanswered=unanswered+1
-                          WHERE user_id=$1 AND proactive_enabled=true RETURNING user_id''',r['user_id'])
+                          WHERE user_id=$1 AND proactive_enabled=true AND unanswered<5
+                          AND (last_proactive_at IS NULL OR last_proactive_at < now()-($2 * interval '1 hour'))
+                          RETURNING user_id''',r['user_id'],hours)
                         if not updated:continue
                         try:
+                            history=await self.pool.fetch('''SELECT role,content FROM chat_messages WHERE character_id=$1 AND user_id=$2 ORDER BY id DESC LIMIT 10''',c['id'],r['user_id'])
+                            turns=[{'role':x['role'],'content':x['content']} for x in reversed(history)]
+                            turns.append({'role':'user','content':'請自然地主動開啟一個話題，避免重複問候。'})
                             async with self.ai_lock:
                                 msg=await generate(config.GEMINI_API_KEY,config.GEMINI_MODEL,
-                                  character_prompt(c),[{'role':'user','content':'根據過去的紀錄，隨便開個話題，或者接續最後對話'}])
+                                  character_prompt(c),turns)
                             msg=msg.strip()[:20]
                             user=await self.fetch_user(r['user_id'])
-                            await user.send(embed=make_embed(f'**{c["name"]}**\n{msg}'))
+                            await user.send(embed=make_embed(msg,c))
                         except (discord.Forbidden,discord.HTTPException):
                             await self.pool.execute('UPDATE chat_settings SET proactive_enabled=false WHERE user_id=$1',r['user_id'])
                             log.info('Cannot send proactive DM; disabled user=%s',r['user_id'])
-                        except Exception:log.exception('Proactive message failed')
+                        except Exception:
+                            await self.pool.execute('UPDATE chat_settings SET unanswered=GREATEST(0,unanswered-1) WHERE user_id=$1',r['user_id'])
+                            log.exception('Proactive message failed')
             except asyncio.CancelledError:break
             except Exception:log.exception('Proactive loop failed')
             await asyncio.sleep(900)
 
 bot = EchoNest()
 
-# 保留 Guild Install 和 User Install
-bot.tree.allowed_installs = app_commands.AppInstallationType(
-    guild=True,
-    user=True
-)
+# User install is needed for DM commands. Guild interactions require the bot to be a member.
+bot.tree.allowed_installs = app_commands.AppInstallationType(guild=True, user=True)
+bot.tree.allowed_contexts = app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True)
 
-# 允許伺服器、Bot 私訊及使用者安裝的私訊情境
-bot.tree.allowed_contexts = app_commands.AppCommandContext(
-    guild=True,
-    dm_channel=True,
-    private_channel=True
-)
-
-# 禁止在未安裝 EchoNest 的伺服器執行指令
 async def check_command_location(i: discord.Interaction):
-    if i.guild_id is None:
-        return True
-
-    if bot.get_guild(i.guild_id) is None:
-        await say(i, '此伺服器尚未安裝 EchoNest。')
+    if i.guild_id is not None and bot.get_guild(i.guild_id) is None:
+        await i.response.send_message('此伺服器尚未安裝 EchoNest。', ephemeral=True)
         return False
-
     return True
 
 bot.tree.interaction_check = check_command_location
+
+async def is_admin(i):
+    if not i.guild_id:
+        return False
+    member = i.user
+    return isinstance(member, discord.Member) and member.guild_permissions.manage_guild
+
+async def can_manage(i, c):
+    if c['scope_type'] == 'guild':
+        return i.guild_id == c['scope_id'] and (c['owner_id'] == i.user.id or await is_admin(i))
+    return c['owner_id'] == i.user.id
+
+async def accessible_character(i, cid):
+    c = await bot.pool.fetchrow("SELECT * FROM characters WHERE id=$1 AND status='active'",cid)
+    if not c:
+        return None
+    if c['scope_type'] == 'guild' and i.guild_id != c['scope_id']:
+        return None
+    if c['scope_type'] == 'dm' and i.guild_id is not None:
+        return None
+    return c if await can_use(i,c) else None
+
+async def can_use(i, c):
+    if c['scope_type'] == 'dm':
+        return c['owner_id'] == i.user.id and i.guild_id is None
+    if await can_manage(i,c):
+        return True
+    mode = c['access_mode']
+    if mode == 'everyone':
+        return True
+    if mode == 'admin':
+        return await is_admin(i)
+    return await bot.pool.fetchval('SELECT 1 FROM character_access WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id) is not None
+
+async def visibility(i):
+    return await bot.pool.fetchval('SELECT private_replies FROM user_preferences WHERE user_id=$1',i.user.id)
 
 async def say(i,text,private=True):
     if i.response.is_done():await i.followup.send(text[:1900],ephemeral=private)
@@ -184,60 +207,123 @@ async def say(i,text,private=True):
 
 async def selected(i):
     kind,sid=area(i)
-    return await bot.pool.fetchrow('''SELECT c.* FROM selections s JOIN characters c ON c.id=s.character_id
+    c=await bot.pool.fetchrow('''SELECT c.* FROM selections s JOIN characters c ON c.id=s.character_id
        WHERE s.scope_type=$1 AND s.scope_id=$2 AND s.user_id=$3 AND c.status='active'
-       AND c.scope_type=$1 AND c.scope_id=$2''',kind,sid,i.user.id)
+       ''',kind,sid,i.user.id)
+    return c if c and await accessible_character(i,c['id']) else None
 
 async def add_item(conn,kind,sid,user,item,count=1):
+    kind,sid='dm',user
     await conn.execute('''INSERT INTO inventories(scope_type,scope_id,user_id,item,quantity)
       VALUES($1,$2,$3,$4,$5) ON CONFLICT(scope_type,scope_id,user_id,item)
       DO UPDATE SET quantity=inventories.quantity+$5''',kind,sid,user,item,count)
 
-@bot.tree.command(name='建立角色',description='建立新的 AI 角色')
-@app_commands.choices(性格=[app_commands.Choice(name=p,value=p) for p in PERSONALITIES])
-async def create(i:discord.Interaction,名稱:str,性格:app_commands.Choice[str],設定:str=''):
-    if not 1<=len(名稱)<=40:return await say(i,'名稱長度須為 1～40 字。')
-    if 性格.value=='自訂' and len(設定)<100:return await say(i,'自訂性格描述至少 100 字。')
-    kind,sid=area(i)
+async def save_new_character(i, name, personality, description, mode, personality_description=''):
+    if not 1 <= len(name) <= 40:
+        return await say(i, '角色名稱長度須為 1～40 字。')
+    kind, sid = area(i)
+    mode = mode if kind == 'guild' else 'everyone'
     async with bot.pool.acquire() as conn:
         async with conn.transaction():
-            cid=await conn.fetchval('''INSERT INTO characters(scope_type,scope_id,owner_id,name,personality,description)
-              VALUES($1,$2,$3,$4,$5,$6) RETURNING id''',kind,sid,i.user.id,名稱,性格.value,設定[:2000])
+            cid = await conn.fetchval('''INSERT INTO characters
+                (scope_type,scope_id,owner_id,name,personality,personality_description,description,access_mode)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id''',
+                kind, sid, i.user.id, name, personality, personality_description, description[:2000], mode)
             await conn.execute('''INSERT INTO selections(scope_type,scope_id,user_id,character_id)
-              VALUES($1,$2,$3,$4) ON CONFLICT(scope_type,scope_id,user_id)
-              DO UPDATE SET character_id=$4''',kind,sid,i.user.id,cid)
-    await say(i,f'已建立「{名稱}」（#{cid}），並設為目前角色。')
+                VALUES($1,$2,$3,$4) ON CONFLICT(scope_type,scope_id,user_id)
+                DO UPDATE SET character_id=$4''',kind,sid,i.user.id,cid)
+    await say(i, f'已建立「{name}」（#{cid}），並設為目前角色。')
+
+class CustomPersonalityModal(discord.ui.Modal, title='自訂角色性格'):
+    personality_name = discord.ui.TextInput(label='性格名稱', min_length=1, max_length=40, placeholder='例如：冷靜的冒險家')
+    personality_detail = discord.ui.TextInput(label='性格描述', style=discord.TextStyle.paragraph,
+                                             min_length=1, max_length=2000,
+                                             placeholder='描述說話方式、個性、反應與喜好')
+    def __init__(self, cid=None, *, name=None, description='', mode='everyone'):
+        super().__init__()
+        self.cid, self.name, self.description, self.mode = cid, name, description, mode
+
+    async def on_submit(self, i: discord.Interaction):
+        title = str(self.personality_name.value).strip()
+        detail = str(self.personality_detail.value).strip()
+        if not title or not detail:
+            return await say(i, '性格名稱與描述都不能為空。')
+        if self.cid is None:
+            return await save_new_character(i, self.name, title, self.description, self.mode, detail)
+        c = await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1', self.cid)
+        if not c or not await can_manage(i,c):
+            return await say(i, '沒有管理權限。')
+        await bot.pool.execute('UPDATE characters SET personality=$1, personality_description=$2 WHERE id=$3',
+                               title, detail, self.cid)
+        await say(i, f'性格已更新為「{title}」。')
+
+@bot.tree.command(name='建立角色',description='建立新的 AI 角色')
+@app_commands.choices(性格=[app_commands.Choice(name=p,value=p) for p in PERSONALITIES],
+                      使用權限=[app_commands.Choice(name=n,value=v) for n,v in [('所有人','everyone'),('僅管理員','admin'),('指定使用者','custom')]])
+async def create(i:discord.Interaction,名稱:str,性格:app_commands.Choice[str],設定:str='',使用權限:app_commands.Choice[str]=None):
+    if not 1 <= len(名稱) <= 40:
+        return await say(i, '角色名稱長度須為 1～40 字。')
+    mode = 使用權限.value if 使用權限 else 'everyone'
+    if 性格.value == '自訂':
+        return await i.response.send_modal(CustomPersonalityModal(name=名稱,description=設定,mode=mode))
+    await save_new_character(i, 名稱, 性格.value, 設定, mode)
 
 @bot.tree.command(name='角色列表',description='列出目前區域的角色')
 async def list_chars(i:discord.Interaction):
     kind,sid=area(i)
-    rows=await bot.pool.fetch('''SELECT id,name,personality FROM characters
-      WHERE scope_type=$1 AND scope_id=$2 AND status='active' ORDER BY id DESC LIMIT 50''',kind,sid)
-    await say(i,'\n'.join(f'#{r["id"]} {r["name"]}（{r["personality"]}）' for r in rows) or '尚無角色。')
+    if kind == 'dm':
+        rows=await bot.pool.fetch("SELECT * FROM characters WHERE scope_type='dm' AND owner_id=$1 AND status='active' ORDER BY id DESC LIMIT 50",i.user.id)
+    else:
+        rows=await bot.pool.fetch("SELECT * FROM characters WHERE scope_type='guild' AND scope_id=$1 AND status='active' ORDER BY id DESC LIMIT 50",sid)
+    visible=[f'#{c["id"]} {c["name"]}（{c["personality"]}）' for c in rows if await can_use(i,c)]
+    await say(i,'\n'.join(visible) or '尚無可使用的角色。')
 
 @bot.tree.command(name='切換角色',description='切換目前對話角色')
 async def switch(i:discord.Interaction,角色編號:int):
     kind,sid=area(i)
-    name=await bot.pool.fetchval('''SELECT name FROM characters WHERE id=$1 AND scope_type=$2
-       AND scope_id=$3 AND status='active' ''',角色編號,kind,sid)
-    if not name:return await say(i,'找不到角色。')
-    await bot.pool.execute('''INSERT INTO selections(scope_type,scope_id,user_id,character_id)
-      VALUES($1,$2,$3,$4) ON CONFLICT(scope_type,scope_id,user_id) DO UPDATE SET character_id=$4''',kind,sid,i.user.id,角色編號)
-    await say(i,f'已切換至「{name}」。')
+    target=await accessible_character(i,角色編號)
+    if not target:return await say(i,'找不到角色或沒有使用權限。')
+    await bot.pool.execute("""INSERT INTO selections(scope_type,scope_id,user_id,character_id)
+      VALUES($1,$2,$3,$4) ON CONFLICT(scope_type,scope_id,user_id) DO UPDATE SET character_id=$4""",kind,sid,i.user.id,角色編號)
+    await say(i,f'已切換至「{target["name"]}」。')
 
 class SettingsView(discord.ui.View):
     def __init__(self,cid,owner):
         super().__init__(timeout=180);self.cid=cid;self.owner=owner
     async def interaction_check(self,i):
-        if i.user.id!=self.owner:
-            await say(i,'只有建立者可以修改。');return False
+        c=await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1',self.cid)
+        if not c or not await can_manage(i,c):
+            await say(i,'沒有管理權限。');return False
         return True
     @discord.ui.button(label='修改名稱',style=discord.ButtonStyle.secondary)
     async def rename(self,i,button):await i.response.send_modal(EditModal(self.cid,'name','修改名稱'))
     @discord.ui.button(label='修改性格',style=discord.ButtonStyle.secondary)
-    async def personality(self,i,button):await i.response.send_modal(EditModal(self.cid,'personality','修改性格'))
+    async def personality(self,i,button):
+        await i.response.send_message('請選擇新的性格：', view=PersonalitySelectView(self.cid), ephemeral=True)
     @discord.ui.button(label='修改圖片',style=discord.ButtonStyle.secondary)
     async def image(self,i,button):await say(i,'使用 /生成角色圖片 產生新圖片，或使用 /上傳角色圖片 上傳圖片。')
+
+class PersonalitySelect(discord.ui.Select):
+    def __init__(self, cid):
+        self.cid = cid
+        super().__init__(placeholder='選擇性格', min_values=1, max_values=1,
+                         options=[discord.SelectOption(label=p, value=p) for p in PERSONALITIES])
+
+    async def callback(self, i: discord.Interaction):
+        c = await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1', self.cid)
+        if not c or not await can_manage(i,c):
+            return await say(i, '沒有管理權限。')
+        choice = self.values[0]
+        if choice == '自訂':
+            return await i.response.send_modal(CustomPersonalityModal(self.cid))
+        await bot.pool.execute("UPDATE characters SET personality=$1, personality_description='' WHERE id=$2",
+                               choice, self.cid)
+        await i.response.edit_message(content=f'性格已更新為「{choice}」。', view=None)
+
+class PersonalitySelectView(discord.ui.View):
+    def __init__(self, cid):
+        super().__init__(timeout=180)
+        self.add_item(PersonalitySelect(cid))
 
 class EditModal(discord.ui.Modal):
     def __init__(self,cid,field,title):
@@ -248,22 +334,26 @@ class EditModal(discord.ui.Modal):
         value=str(self.value.value).strip()
         if not value:return await say(i,'內容不能為空。')
         kind,sid=area(i)
-        sql=f'UPDATE characters SET {self.field}=$1 WHERE id=$2 AND owner_id=$3 AND scope_type=$4 AND scope_id=$5'
-        result=await bot.pool.execute(sql,value,self.cid,i.user.id,kind,sid)
+        c=await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1',self.cid)
+        if not c or not await can_manage(i,c):return await say(i,'無權修改。')
+        sql=f'UPDATE characters SET {self.field}=$1 WHERE id=$2'
+        result=await bot.pool.execute(sql,value,self.cid)
         await say(i,'已更新。' if result=='UPDATE 1' else '無權修改。')
 
 @bot.tree.command(name='角色設定',description='透過按鈕編輯角色')
 async def settings(i:discord.Interaction,角色編號:int):
     kind,sid=area(i)
-    c=await bot.pool.fetchrow('SELECT id,name FROM characters WHERE id=$1 AND owner_id=$2 AND scope_type=$3 AND scope_id=$4',角色編號,i.user.id,kind,sid)
-    if not c:return await say(i,'找不到你建立的角色。')
+    c=await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1 AND scope_type=$2 AND scope_id=$3',角色編號,kind,sid)
+    if not c or not await can_manage(i,c):return await say(i,'沒有管理權限。')
     await i.response.send_message(f'編輯「{c["name"]}」',view=SettingsView(c['id'],i.user.id),ephemeral=True)
 
-@bot.tree.command(name='刪除角色',description='永久刪除自己建立的角色')
+@bot.tree.command(name='刪除角色',description='永久刪除有管理權的角色')
 async def delete(i:discord.Interaction,角色編號:int,確認:str):
     if 確認!='永久刪除':return await say(i,'請輸入「永久刪除」確認。')
     kind,sid=area(i)
-    result=await bot.pool.execute('DELETE FROM characters WHERE id=$1 AND owner_id=$2 AND scope_type=$3 AND scope_id=$4',角色編號,i.user.id,kind,sid)
+    c=await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1 AND scope_type=$2 AND scope_id=$3',角色編號,kind,sid)
+    if not c or not await can_manage(i,c):return await say(i,'沒有管理權限。')
+    result=await bot.pool.execute('DELETE FROM characters WHERE id=$1',角色編號)
     if result=='DELETE 1':
         try:await delete_image(角色編號)
         except Exception:log.exception('Storage cleanup failed')
@@ -284,6 +374,8 @@ async def status(i:discord.Interaction):
     c=await selected(i)
     if not c:return await say(i,'請先建立或切換角色。')
     aff=await bot.pool.fetchval('SELECT points FROM affection WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id) or 0
+    progress=await bot.pool.fetchrow('SELECT level,exp,mood FROM player_progress WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id)
+    level,exp,mood=(progress['level'],progress['exp'],progress['mood']) if progress else (1,0,70)
     portrait=await fetch_portrait(c['image_url'])
     owner_name = str(c['owner_id'])
     if c['scope_type'] == 'guild' and i.guild:
@@ -296,7 +388,7 @@ async def status(i:discord.Interaction):
             owner_name = owner_user.display_name
         except (discord.HTTPException, AttributeError):
             pass
-    card=await asyncio.to_thread(render_card,c['name'],c['personality'],owner_name,c['mood'],aff,c['level'],c['exp'],portrait)
+    card=await asyncio.to_thread(render_card,c['name'],c['personality'],owner_name,mood,aff,level,exp,portrait)
     await i.followup.send(file=discord.File(card,filename='character.png'),ephemeral=True)
 
 async def respond(i, message, dm_message=None):
@@ -309,18 +401,22 @@ async def respond(i, message, dm_message=None):
     if not 1 <= len(message.strip()) <= 1000:
         return await notify('訊息長度需為 1～1000字。')
     if dm_message is None:
-        await i.response.defer(thinking=True)
+        await i.response.defer(thinking=True, ephemeral=bool(await visibility(i)))
     c = await selected(i)
     if not c:
-        return await notify('請先建立或切換角色。')
+        return await notify('請先建立或切換有權使用的角色。')
+    if bot.ai_waiting>=10:
+        return await notify('目前 AI 佇列較長，請稍後再試。')
+    bot.ai_waiting+=1
     async with bot.ai_lock:
+        bot.ai_waiting-=1
         history=await bot.pool.fetch('''SELECT role,content,user_id FROM chat_messages
-          WHERE character_id=$1 ORDER BY id DESC LIMIT 20''',c['id'])
+          WHERE character_id=$1 AND user_id=$2 ORDER BY id DESC LIMIT 20''',c['id'],i.user.id)
         turns=[{'role':r['role'],'content':(f'玩家 {r["user_id"]}: ' if r['role']=='user' else '')+r['content']} for r in reversed(history)]
         turns.append({'role':'user','content':f'{message}'})
-        summary=await bot.pool.fetchval('SELECT summary FROM memories WHERE character_id=$1',c['id']) or ''
+        summary=await bot.pool.fetchval('SELECT summary FROM player_memories WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id) or ''
         query=message.lower()
-        tags=await bot.pool.fetch('SELECT tag,content FROM important_memories WHERE character_id=$1 ORDER BY id DESC LIMIT 50',c['id'])
+        tags=await bot.pool.fetch('SELECT tag,content FROM important_memories WHERE character_id=$1 AND user_id=$2 ORDER BY id DESC LIMIT 50',c['id'],i.user.id)
         matched=[r['content'] for r in tags if r['tag'].lower() in query][:3]
         try:
             reply = await generate(
@@ -336,32 +432,40 @@ async def respond(i, message, dm_message=None):
         async with bot.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute('INSERT INTO chat_messages(character_id,user_id,role,content) VALUES($1,$2,$3,$4)',c['id'],i.user.id,'user',message)
-                await conn.execute('INSERT INTO chat_messages(character_id,user_id,role,content) VALUES($1,NULL,$2,$3)',c['id'],'assistant',reply)
+                await conn.execute('INSERT INTO chat_messages(character_id,user_id,role,content) VALUES($1,$2,$3,$4)',c['id'],i.user.id,'assistant',reply)
                 await conn.execute('''INSERT INTO affection(character_id,user_id,points,last_reward_at,reward_day,reward_count)
                   VALUES($1,$2,1,now(),$3,1) ON CONFLICT(character_id,user_id)
                   DO UPDATE SET points=affection.points+CASE WHEN affection.reward_day=$3 AND affection.reward_count>=20 THEN 0
                   WHEN affection.last_reward_at>now()-interval '60 seconds' THEN 0 ELSE 1 END,
                   reward_count=CASE WHEN affection.reward_day=$3 THEN affection.reward_count+1 ELSE 1 END,
                   reward_day=$3,last_reward_at=now()''',c['id'],i.user.id,day())
-                await conn.execute('UPDATE characters SET exp=exp+1,level=1+((exp+1)/100) WHERE id=$1',c['id'])
+                await conn.execute('''INSERT INTO player_progress(character_id,user_id,exp,level) VALUES($1,$2,1,1) ON CONFLICT(character_id,user_id) DO UPDATE SET exp=player_progress.exp+1,level=1+((player_progress.exp+1)/100)''',c['id'],i.user.id)
                 if not i.guild_id:
                     await conn.execute('''INSERT INTO chat_settings(user_id,last_chat_at,unanswered) VALUES($1,now(),0)
                       ON CONFLICT(user_id) DO UPDATE SET last_chat_at=now(),unanswered=0''',i.user.id)
-                count=await conn.fetchval('SELECT count(*) FROM chat_messages WHERE character_id=$1',c['id'])
+                count=await conn.fetchval('SELECT count(*) FROM chat_messages WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id)
                 if count>80:
-                    old=await conn.fetch('''SELECT id,role,content FROM chat_messages WHERE character_id=$1
-                      ORDER BY id ASC LIMIT 20''',c['id'])
+                    old=await conn.fetch('''SELECT id,role,content FROM chat_messages WHERE character_id=$1 AND user_id=$2
+                      ORDER BY id ASC LIMIT 20''',c['id'],i.user.id)
                     compact=' '.join(f'{r["role"]}: {r["content"][:100]}' for r in old)
-                    await conn.execute('''INSERT INTO memories(character_id,summary) VALUES($1,$2)
-                      ON CONFLICT(character_id) DO UPDATE SET summary=right(memories.summary || ' ' || $2,1800),updated_at=now()''',c['id'],compact[:1200])
                     await conn.execute('DELETE FROM chat_messages WHERE id=ANY($1::bigint[])',[r['id'] for r in old])
+    # Compress older turns into a model-written summary outside the DB transaction.
+    if count > 80 and old:
+        try:
+            existing=await bot.pool.fetchval('SELECT summary FROM player_memories WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id) or ''
+            prompt='將以下角色對話整理成簡潔、忠實的長期記憶（繁體中文，600字內）。只保留重要事實、人物偏好與待續話題，不可虛構。'
+            summary_text=await generate(config.GEMINI_API_KEY,config.GEMINI_MODEL,prompt,
+                [{'role':'user','content':existing+'\n'+compact}])
+            await bot.pool.execute('''INSERT INTO player_memories(character_id,user_id,summary) VALUES($1,$2,$3)
+                ON CONFLICT(character_id,user_id) DO UPDATE SET summary=$3,updated_at=now()''',c['id'],i.user.id,summary_text[:1800])
+        except Exception:log.exception('Memory summary failed')
     for offset in range(0, len(reply), 1900):
         embed = make_embed(reply[offset:offset + 1900], c)
 
         if dm_message is not None:
             await dm_message.reply(embed=embed, mention_author=False)
         else:
-            await i.followup.send(embed=embed)
+            await i.followup.send(embed=embed, ephemeral=bool(await visibility(i)))
 
 @bot.tree.command(name='聊天',description='與目前角色對話')
 async def chat(i:discord.Interaction,訊息:str):await respond(i,訊息)
@@ -396,41 +500,38 @@ async def chat_settings(i:discord.Interaction,主動發言:bool,頻率:app_comma
 async def remember(i:discord.Interaction, 標籤:str, 內容:str):
     c = await selected(i)
     if not c:return await say(i,'請先建立或切換角色。')
-    if c['owner_id'] != i.user.id:return await say(i,'只有建立者可以編輯角色記憶。')
     if not (1<=len(標籤)<=30 and 1<=len(內容)<=200):
         return await say(i,'標籤 1～30 字、內容 1～200 字。')
     async with bot.pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute('INSERT INTO important_memories(character_id,tag,content) VALUES($1,$2,$3)',c['id'],標籤,內容)
-            await conn.execute('''DELETE FROM important_memories WHERE character_id=$1 AND id NOT IN
-                (SELECT id FROM important_memories WHERE character_id=$1 ORDER BY id DESC LIMIT 50)''',c['id'])
+            await conn.execute('INSERT INTO important_memories(character_id,user_id,tag,content) VALUES($1,$2,$3,$4)',c['id'],i.user.id,標籤,內容)
+            await conn.execute('''DELETE FROM important_memories WHERE character_id=$1 AND user_id=$2 AND id NOT IN
+                (SELECT id FROM important_memories WHERE character_id=$1 AND user_id=$2 ORDER BY id DESC LIMIT 50)''',c['id'],i.user.id)
     await say(i,'重要記憶已保存。')
 
 @bot.tree.command(name='記憶列表', description='查看角色的重要記憶')
 async def memory_list(i:discord.Interaction):
     c=await selected(i)
     if not c:return await say(i,'請先建立或切換角色。')
-    if c['owner_id']!=i.user.id:return await say(i,'只有建立者可以查看完整記憶。')
-    rows=await bot.pool.fetch('SELECT id,tag,content FROM important_memories WHERE character_id=$1 ORDER BY id DESC LIMIT 15',c['id'])
+    rows=await bot.pool.fetch('SELECT id,tag,content FROM important_memories WHERE character_id=$1 AND user_id=$2 ORDER BY id DESC LIMIT 15',c['id'],i.user.id)
     await say(i,'\n'.join(f'#{r["id"]} [{r["tag"]}] {r["content"]}' for r in rows) or '沒有重要記憶。')
 
 @bot.tree.command(name='刪除記憶', description='刪除自己角色的一則重要記憶')
 async def forget_memory(i:discord.Interaction, 記憶編號:int):
     c=await selected(i)
     if not c:return await say(i,'請先建立或切換角色。')
-    if c['owner_id']!=i.user.id:return await say(i,'只有建立者可以刪除記憶。')
-    result=await bot.pool.execute('DELETE FROM important_memories WHERE id=$1 AND character_id=$2',記憶編號,c['id'])
+    result=await bot.pool.execute('DELETE FROM important_memories WHERE id=$1 AND character_id=$2 AND user_id=$3',記憶編號,c['id'],i.user.id)
     await say(i,'記憶已刪除。' if result=='DELETE 1' else '找不到這則記憶。')
 
 @bot.tree.command(name='背包',description='查看持有物品')
 async def inventory(i:discord.Interaction):
-    kind,sid=area(i)
+    kind,sid='dm',i.user.id
     rows=await bot.pool.fetch('SELECT item,quantity FROM inventories WHERE scope_type=$1 AND scope_id=$2 AND user_id=$3 AND quantity>0 ORDER BY item',kind,sid,i.user.id)
     await say(i,'\n'.join(f'{r["item"]} × {r["quantity"]}' for r in rows) or '背包是空的。')
 
 @bot.tree.command(name='簽到',description='領取每日禮物')
 async def checkin(i:discord.Interaction):
-    kind,sid=area(i)
+    kind,sid='dm',i.user.id
     async with bot.pool.acquire() as conn:
         async with conn.transaction():
             row=await conn.fetchval('''INSERT INTO checkins(scope_type,scope_id,user_id,day) VALUES($1,$2,$3,$4)
@@ -438,27 +539,60 @@ async def checkin(i:discord.Interaction):
             if row:await add_item(conn,kind,sid,i.user.id,'花束')
     await say(i,'簽到成功，獲得花束 × 1。' if row else '今天已經簽到過。')
 
-@bot.tree.command(name='送禮',description='送禮給目前角色')
-async def gift(i:discord.Interaction,禮物:str):
+class GiftSelect(discord.ui.Select):
+    def __init__(self, items):
+        super().__init__(placeholder='選擇背包中的禮物',options=[discord.SelectOption(label=r['item'],value=r['item'],description=f"持有 {r['quantity']} 個") for r in items[:25]])
+    async def callback(self,i):
+        if i.user.id!=self.view.user_id:return await say(i,'只有發起者可以操作。')
+        self.view.item=self.values[0]
+        await i.response.edit_message(content=f'準備送給 {self.view.character_name}：{self.view.item} ×1',view=self.view)
+
+class GiftView(discord.ui.View):
+    def __init__(self,user_id,character,items):
+        super().__init__(timeout=180)
+        self.user_id=user_id;self.character_id=character['id'];self.character_name=character['name'];self.item=None;self.sent=False
+        self.add_item(GiftSelect(items))
+    @discord.ui.button(label='確認送禮',style=discord.ButtonStyle.primary,row=1)
+    async def confirm(self,i,button):
+        if i.user.id!=self.user_id:return await say(i,'只有發起者可以操作。')
+        if self.sent:return await say(i,'已經送出。')
+        if not self.item:return await say(i,'請先選擇禮物。')
+        c=await accessible_character(i,self.character_id)
+        if not c:return await say(i,'角色已不存在或沒有使用權限。')
+        async with bot.pool.acquire() as conn:
+            async with conn.transaction():
+                remaining=await conn.fetchval('''UPDATE inventories SET quantity=quantity-1
+                    WHERE scope_type='dm' AND scope_id=$1 AND user_id=$1 AND item=$2 AND quantity>0 RETURNING quantity''',i.user.id,self.item)
+                if remaining is None:return await say(i,'庫存不足，請重新開啟 /送禮。')
+                gain=gift_affection(self.character_id,self.item)
+                await conn.execute('''INSERT INTO affection(character_id,user_id,points) VALUES($1,$2,$3)
+                    ON CONFLICT(character_id,user_id) DO UPDATE SET points=affection.points+$3''',self.character_id,i.user.id,gain)
+        await bot.pool.execute('''INSERT INTO player_progress(character_id,user_id,mood) VALUES($1,$2,72) ON CONFLICT(character_id,user_id) DO UPDATE SET mood=LEAST(100,player_progress.mood+2)''',self.character_id,i.user.id)
+        self.sent=True
+        for child in self.children:child.disabled=True
+        await i.response.edit_message(content=f'已送出 {self.item} ×1，好感度 +{gain}，剩餘 {remaining} 個。',view=self)
+        try:
+            async with bot.ai_lock:
+                reaction=await generate(config.GEMINI_API_KEY,config.GEMINI_MODEL,character_prompt(c),[{'role':'user','content':f'玩家送給你「{self.item}」，請自然回應。'}])
+            await i.followup.send(embed=make_embed(reaction.strip()[:60],c),ephemeral=True)
+        except Exception:log.exception('Gift reaction generation failed')
+
+@bot.tree.command(name='送禮',description='從背包選擇禮物送給目前角色')
+async def gift(i:discord.Interaction):
     c=await selected(i)
     if not c:return await say(i,'請先建立或切換角色。')
-    if 禮物 not in GIFTS:return await say(i,'未知禮物，請先使用 /背包 查看名稱。')
-    kind,sid=area(i)
-    async with bot.pool.acquire() as conn:
-        async with conn.transaction():
-            used=await conn.fetchval('''UPDATE inventories SET quantity=quantity-1
-              WHERE scope_type=$1 AND scope_id=$2 AND user_id=$3 AND item=$4 AND quantity>0 RETURNING quantity''',kind,sid,i.user.id,禮物)
-            if used is not None:
-                await conn.execute('''INSERT INTO affection(character_id,user_id,points) VALUES($1,$2,$3)
-                  ON CONFLICT(character_id,user_id) DO UPDATE SET points=affection.points+$3''',c['id'],i.user.id,GIFTS[禮物])
-                await conn.execute('UPDATE characters SET mood=LEAST(100,mood+2) WHERE id=$1',c['id'])
-    await say(i,f'已送出 {禮物}，好感度 +{GIFTS[禮物]}。' if used is not None else '背包沒有這件物品。')
+    rows=await bot.pool.fetch("SELECT item,quantity FROM inventories WHERE scope_type='dm' AND scope_id=$1 AND user_id=$1 AND quantity>0 ORDER BY item LIMIT 25",i.user.id)
+    rows=[r for r in rows if r['item'] in GIFTS]
+    if not rows:return await say(i,'背包沒有可贈送的禮物。')
+    await i.response.send_message(f'送禮給「{c["name"]}」：每次只能送 1 個。',view=GiftView(i.user.id,c,rows),ephemeral=True)
 
-@bot.tree.command(name='探索',description='生成隨機冒險故事並獲得物品，每日最多五次')
-async def explore(i:discord.Interaction):
-    await i.response.defer(thinking=True, ephemeral=True)
-    kind,sid=area(i)
-    item=random.choice(list(GIFTS))
+async def run_explore(i:discord.Interaction):
+    if not i.response.is_done():
+        await i.response.defer(thinking=True, ephemeral=True)
+    kind,sid='dm',i.user.id
+    c=await selected(i)
+    if not c:return await say(i,'請先選擇角色。')
+    item=random.choice(list(GIFTS)) if random.random()<0.85 else None
     scene=random.choice(['雨夜小鎮','山中遺跡','海港市集','地下圖書館','森林車站','浮空花園','舊城巷弄','迷霧燈塔','荒廢遊樂園','河畔村莊'])
     event=random.choice(['偶然相遇','奇怪的委託','意外發現','一場誤會','解開小謎題','幫助陌生人','不可思議的巧合'])
     async with bot.pool.acquire() as conn:
@@ -466,7 +600,7 @@ async def explore(i:discord.Interaction):
             count=await conn.fetchval("""INSERT INTO explorations(scope_type,scope_id,user_id,day,count)
               VALUES($1,$2,$3,$4,1) ON CONFLICT(scope_type,scope_id,user_id,day)
               DO UPDATE SET count=explorations.count+1 WHERE explorations.count<5 RETURNING count""",kind,sid,i.user.id,day())
-            if count:
+            if count and item:
                 await add_item(conn,kind,sid,i.user.id,item)
                 await conn.execute("""INSERT INTO collections(scope_type,scope_id,user_id,key) VALUES($1,$2,$3,$4)
                   ON CONFLICT DO NOTHING""",kind,sid,i.user.id,'初次探索')
@@ -475,7 +609,7 @@ async def explore(i:discord.Interaction):
 
     # The reward is committed by the game; AI generates narrative only.
     story_prompt=(f'你是文字冒險遊戲的敘事者。以繁體中文寫一段約100～180字的完整短篇探索故事。'
-                  f'地點：{scene}。事件：{event}。結尾自然獲得物品「{item}」。'
+                  f'地點：{scene}。事件：{event}。同行角色：{c["name"]}，個性：{c["personality"]}。結尾獎勵：{item or "沒有獎勵"}。'
                   '每次創作不同人物、衝突、轉折和細節，不要使用制式開頭。'
                   '不要列出數值、不要宣稱獲得其他道具、不要用Markdown標題。')
     try:
@@ -485,12 +619,33 @@ async def explore(i:discord.Interaction):
         story=story.strip()[:850]
     except Exception:
         log.exception('Exploration story generation failed')
-        story=f'你來到{scene}，經歷了{event}。在一番探索後，你意外得到了{item}。'
-    await i.followup.send(f'**{scene}**\n{story}\n\n🎁 獲得：{item} ×1\n今日探索：{count}/5',ephemeral=True)
+        story=f'你和{c["name"]}來到{scene}，經歷了{event}。這趟旅程留下了難忘的回憶。'
+    await i.followup.send(embed=make_embed(f'**{scene}**\n{story}\n\n獎勵：{item + " ×1" if item else "無"}\n今日探索：{count}/5',c),ephemeral=True)
+
+class ExploreView(discord.ui.View):
+    def __init__(self,user_id):
+        super().__init__(timeout=180)
+        self.user_id=user_id
+        self.used=False
+    @discord.ui.button(label='開始探索',style=discord.ButtonStyle.primary)
+    async def begin(self,i,button):
+        if i.user.id!=self.user_id:return await say(i,'只有發起者能開始探索。')
+        if self.used:return await say(i,'這次探索已開始。')
+        self.used=True
+        for child in self.children:child.disabled=True
+        await i.response.edit_message(view=self)
+        await run_explore(i)
+
+@bot.tree.command(name='探索',description='開始隨機文字冒險，每日最多五次')
+async def explore(i:discord.Interaction):
+    c=await selected(i)
+    if not c:return await say(i,'請先建立或切換角色。')
+    count=await bot.pool.fetchval("SELECT count FROM explorations WHERE scope_type='dm' AND scope_id=$1 AND user_id=$1 AND day=$2",i.user.id,day()) or 0
+    await i.response.send_message(f'與「{c["name"]}」一起探索｜今日 {count}/5 次',view=ExploreView(i.user.id),ephemeral=True)
 
 @bot.tree.command(name='任務',description='領取每日探索任務獎勵')
 async def quests(i:discord.Interaction):
-    kind,sid=area(i)
+    kind,sid='dm',i.user.id
     async with bot.pool.acquire() as conn:
         async with conn.transaction():
             done=await conn.fetchval('SELECT count FROM explorations WHERE scope_type=$1 AND scope_id=$2 AND user_id=$3 AND day=$4',kind,sid,i.user.id,day())
@@ -500,11 +655,95 @@ async def quests(i:discord.Interaction):
             if row:await add_item(conn,kind,sid,i.user.id,'巧克力')
     await say(i,'任務完成，獲得巧克力 × 1。' if row else '今日獎勵已領取。')
 
-@bot.tree.command(name='收藏',description='查看收藏')
+@bot.tree.command(name='收藏',description='查看收藏的角色名稱、圖片與簡介')
 async def collection(i:discord.Interaction):
+    rows=await bot.pool.fetch('''SELECT c.* FROM character_favorites f JOIN characters c ON c.id=f.character_id
+        WHERE f.user_id=$1 AND c.status='active' ORDER BY f.created_at DESC LIMIT 10''',i.user.id)
+    rows=[c for c in rows if await accessible_character(i,c['id'])]
+    if not rows:return await say(i,'目前沒有可查看的收藏角色。')
+    embeds=[]
+    for c in rows:
+        e=discord.Embed(title=c['name'],description=(c['description'] or '尚無簡介')[:300],color=0x678bc3)
+        if c['image_url'].startswith('https://'):e.set_thumbnail(url=c['image_url'])
+        embeds.append(e)
+    await i.response.send_message(embeds=embeds,ephemeral=True)
+
+@bot.tree.command(name='收藏角色',description='收藏或取消收藏目前選擇的角色')
+async def favorite(i:discord.Interaction,收藏:bool=True):
+    c=await selected(i)
+    if not c:return await say(i,'請先選擇角色。')
+    if 收藏:
+        await bot.pool.execute('INSERT INTO character_favorites(character_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING',c['id'],i.user.id)
+    else:
+        await bot.pool.execute('DELETE FROM character_favorites WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id)
+    await say(i,'已收藏角色。' if 收藏 else '已取消收藏。')
+
+@bot.tree.command(name='回覆可見性',description='設定聊天回覆是否僅自己可見')
+async def reply_visibility(i:discord.Interaction,僅自己可見:bool):
+    await bot.pool.execute('''INSERT INTO user_preferences(user_id,private_replies) VALUES($1,$2)
+      ON CONFLICT(user_id) DO UPDATE SET private_replies=$2''',i.user.id,僅自己可見)
+    await say(i,'已設為僅自己可見。' if 僅自己可見 else '已設為公開回覆。')
+
+@bot.tree.command(name='角色權限',description='設定角色的使用權限')
+@app_commands.choices(模式=[app_commands.Choice(name=n,value=v) for n,v in [('所有人','everyone'),('僅管理員','admin'),('指定使用者','custom')]])
+async def access_settings(i:discord.Interaction,角色編號:int,模式:app_commands.Choice[str]):
     kind,sid=area(i)
-    rows=await bot.pool.fetch('SELECT key FROM collections WHERE scope_type=$1 AND scope_id=$2 AND user_id=$3',kind,sid,i.user.id)
-    await say(i,'\n'.join(r['key'] for r in rows) or '尚無收藏。')
+    c=await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1 AND scope_type=$2 AND scope_id=$3',角色編號,kind,sid)
+    if not c or not await can_manage(i,c):return await say(i,'沒有管理權限。')
+    await bot.pool.execute('UPDATE characters SET access_mode=$1 WHERE id=$2',模式.value,角色編號)
+    await say(i,'已更新角色使用權限。')
+
+@bot.tree.command(name='角色授權',description='授權或取消指定使用者使用角色')
+async def grant_access(i:discord.Interaction,角色編號:int,使用者:discord.User,允許:bool=True):
+    kind,sid=area(i)
+    c=await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1 AND scope_type=$2 AND scope_id=$3',角色編號,kind,sid)
+    if not c or not await can_manage(i,c):return await say(i,'沒有管理權限。')
+    if 允許:
+        await bot.pool.execute('INSERT INTO character_access(character_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING',角色編號,使用者.id)
+    else:
+        await bot.pool.execute('DELETE FROM character_access WHERE character_id=$1 AND user_id=$2',角色編號,使用者.id)
+    await say(i,'授權名單已更新。請將角色權限設為「指定使用者」才會生效。')
+
+class DeleteMultiView(discord.ui.View):
+    def __init__(self,owner,choices):
+        super().__init__(timeout=180)
+        self.owner=owner
+        self.selected=[]
+        self.add_item(DeleteMultiSelect(choices))
+    @discord.ui.button(label='永久刪除所選角色',style=discord.ButtonStyle.danger,row=1)
+    async def confirm(self,i:discord.Interaction,button):
+        if i.user.id!=self.owner:return await say(i,'只有發起者能操作。')
+        if not self.selected:return await say(i,'請先選擇角色。')
+        kind,sid=area(i)
+        ids=self.selected[:]
+        if kind=='guild' and not await is_admin(i):return await say(i,'需要管理伺服器權限。')
+        if kind=='guild':
+            rows=await bot.pool.fetch('DELETE FROM characters WHERE id=ANY($1::bigint[]) AND scope_type=$2 AND scope_id=$3 RETURNING id',ids,kind,sid)
+        else:
+            rows=await bot.pool.fetch('DELETE FROM characters WHERE id=ANY($1::bigint[]) AND owner_id=$2 AND scope_type=$3 AND scope_id=$4 RETURNING id',ids,self.owner,kind,sid)
+        for row in rows:
+            try:await delete_image(row['id'])
+            except Exception:log.exception('Storage cleanup failed')
+        self.stop()
+        await i.response.edit_message(content=f'已永久刪除 {len(rows)} 個角色。',view=None)
+
+class DeleteMultiSelect(discord.ui.Select):
+    def __init__(self,choices):
+        super().__init__(placeholder='選擇要永久刪除的角色',min_values=1,max_values=min(25,len(choices)),options=choices)
+    async def callback(self,i:discord.Interaction):
+        if i.user.id!=self.view.owner:return await say(i,'只有發起者能操作。')
+        self.view.selected=[int(x) for x in self.values]
+        await i.response.send_message(f'已選取 {len(self.values)} 個角色，請按永久刪除。',ephemeral=True)
+
+@bot.tree.command(name='批次刪除角色',description='多選永久刪除自己建立的角色')
+async def delete_many(i:discord.Interaction):
+    kind,sid=area(i)
+    if kind=='guild' and not await is_admin(i):return await say(i,'需要管理伺服器權限。')
+    rows=await bot.pool.fetch('''SELECT id,name FROM characters WHERE scope_type=$1 AND scope_id=$2
+      AND ($3='guild' OR owner_id=$4) ORDER BY id DESC LIMIT 25''',kind,sid,kind,i.user.id)
+    if not rows:return await say(i,'沒有可刪除的角色。')
+    choices=[discord.SelectOption(label=r['name'][:95],value=str(r['id']),description=f'角色 #{r["id"]}') for r in rows]
+    await i.response.send_message('選擇要永久刪除的角色（無法復原）：',view=DeleteMultiView(i.user.id,choices),ephemeral=True)
 
 # All styles share the same intimate, face-dominant composition.
 # Style only changes the rendering medium, never the camera distance.
@@ -551,8 +790,9 @@ class ImageConfirmView(discord.ui.View):
         self.prompt = prompt
 
     async def interaction_check(self, interaction):
-        if interaction.user.id != self.owner_id:
-            await say(interaction, '只有建立者可以操作這張圖片。')
+        c=await bot.pool.fetchrow('SELECT * FROM characters WHERE id=$1',self.character_id)
+        if interaction.user.id != self.owner_id or not c or not await can_manage(interaction,c):
+            await say(interaction, '沒有管理權限。')
             return False
         return True
 
@@ -560,15 +800,13 @@ class ImageConfirmView(discord.ui.View):
     async def confirm(self, interaction, button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         kind, sid = area(interaction)
-        current = await bot.pool.fetchval('''SELECT id FROM characters WHERE id=$1 AND owner_id=$2
-            AND scope_type=$3 AND scope_id=$4 AND status='active' ''',
-            self.character_id, interaction.user.id, kind, sid)
+        c=await bot.pool.fetchrow("SELECT * FROM characters WHERE id=$1 AND status='active'",self.character_id)
+        current=c and await can_manage(interaction,c)
         if not current:
             return await say(interaction, '角色不存在或已無權修改。')
         try:
             url = await upload_image(self.character_id, self.image_bytes)
-            await bot.pool.execute('UPDATE characters SET image_url=$1 WHERE id=$2 AND owner_id=$3',
-                                   url, self.character_id, interaction.user.id)
+            await bot.pool.execute('UPDATE characters SET image_url=$1 WHERE id=$2',url,self.character_id)
         except Exception:
             log.exception('Unable to save generated portrait character=%s', self.character_id)
             return await say(interaction, '儲存失敗，請檢查 Storage 設定。')
@@ -580,9 +818,8 @@ class ImageConfirmView(discord.ui.View):
     async def regenerate(self, interaction, button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         kind, sid = area(interaction)
-        exists = await bot.pool.fetchval('''SELECT id FROM characters WHERE id=$1 AND owner_id=$2
-            AND scope_type=$3 AND scope_id=$4 AND status='active' ''',
-            self.character_id, interaction.user.id, kind, sid)
+        c=await bot.pool.fetchrow("SELECT * FROM characters WHERE id=$1 AND status='active'",self.character_id)
+        exists=c and await can_manage(interaction,c)
         if not exists:
             return await say(interaction, '角色不存在或已無權修改。')
         try:
@@ -626,8 +863,8 @@ async def character_image(i:discord.Interaction, 人物形容:str, 風格:app_co
     c = await selected(i)
     if not c:
         return await say(i, '請先建立或切換角色。')
-    if c['owner_id'] != i.user.id:
-        return await say(i, '只有角色建立者可以生成角色圖片。')
+    if not await can_manage(i,c):
+        return await say(i, '沒有管理權限。')
     try:
         prompt = portrait_prompt(c, 人物形容, 風格.value, 動作)
         async with bot.ai_lock:
@@ -648,26 +885,33 @@ async def upload_portrait(i:discord.Interaction,圖片:discord.Attachment):
     await i.response.defer(thinking=True,ephemeral=True)
     c=await selected(i)
     if not c:return await say(i,'請先建立或切換角色。')
-    if c['owner_id']!=i.user.id:return await say(i,'只有角色建立者可以修改圖片。')
+    if not await can_manage(i,c):return await say(i,'沒有管理權限。')
     if not 圖片.content_type or not 圖片.content_type.startswith('image/') or 圖片.size>10*1024*1024:
         return await say(i,'請上傳小於 10MB 的圖片。')
     try:
         from images import validate_image
         data=validate_image(await 圖片.read())
         url=await upload_image(c['id'],data)
-        await bot.pool.execute('UPDATE characters SET image_url=$1 WHERE id=$2 AND owner_id=$3',url,c['id'],i.user.id)
+        await bot.pool.execute('UPDATE characters SET image_url=$1 WHERE id=$2',url,c['id'])
         await say(i,'角色圖片已更新。')
     except Exception:
         log.exception('Portrait upload failed');await say(i,'上傳失敗，請檢查 Storage 設定。')
 
 @bot.event
 async def on_member_remove(member):
-    try:
-        rows=await bot.pool.fetch('DELETE FROM characters WHERE scope_type=$1 AND scope_id=$2 AND owner_id=$3 RETURNING id','guild',member.guild.id,member.id)
-        for row in rows:
-            try:await delete_image(row['id'])
-            except Exception:log.exception('Image cleanup failed')
-    except Exception:log.exception('Owner cleanup failed')
+    # Retain server characters; notify the departed creator with existing portrait art.
+    rows=await bot.pool.fetch('''SELECT name,image_url FROM characters
+      WHERE scope_type='guild' AND scope_id=$1 AND owner_id=$2 AND status='active' LIMIT 10''',member.guild.id,member.id)
+    if rows:
+        try:
+            embed=discord.Embed(title='角色離開伺服器',description=f'你已離開「{member.guild.name}」。該伺服器的角色仍留在原伺服器，無法在其他地方使用。',color=0x678bc3)
+            embed.add_field(name='角色',value='、'.join(c['name'] for c in rows)[:900])
+            image=next((c['image_url'] for c in rows if c['image_url'].startswith('https://')),None)
+            if image:embed.set_image(url=image)
+            await member.send(embed=embed)
+        except (discord.Forbidden,discord.HTTPException):
+            log.info('Could not send departure notification to %s',member.id)
+    log.info('Member %s left guild %s; characters retained',member.id,member.guild.id)
 
 @bot.tree.error
 async def on_error(i,error):
@@ -680,12 +924,3 @@ if __name__=='__main__':
     if not all((config.DISCORD_TOKEN,config.DATABASE_URL,config.GEMINI_API_KEY)):
         raise RuntimeError('Missing DISCORD_TOKEN, DATABASE_URL or GEMINI_API_KEY')
     bot.run(config.DISCORD_TOKEN,log_handler=None)
-
-if __name__ == "__main__":
-    print("Guild Install:", bot.tree.allowed_installs.guild)
-    print("User Install:", bot.tree.allowed_installs.user)
-    print("Guild Context:", bot.tree.allowed_contexts.guild)
-    print("DM Context:", bot.tree.allowed_contexts.dm_channel)
-    print("Private Context:", bot.tree.allowed_contexts.private_channel)
-
-    bot.run(config.DISCORD_TOKEN)
