@@ -237,7 +237,7 @@ async def respond(i,message):
                 config.GEMINI_API_KEY,
                 config.GEMINI_MODEL,
                 c['personality'] + ' ' + c['description']
-                + '\n請使用繁體中文回覆，每次回覆不得超過20個字（包含標點符號）。保持角色性格，回答自然簡短。',
+                + '\n請使用繁體中文回覆，每次回覆不得超過30個字（包含標點符號）。保持角色性格，回答自然簡短，但要正確回答到問題。',
                 turns,
                 summary + '\n' + '\n'.join(matched)
             )
