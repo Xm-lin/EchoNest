@@ -7,7 +7,7 @@ import asyncpg
 import discord
 from discord import app_commands
 from discord.ext import commands
-
+from health import start_health_server
 import config
 from ai import generate
 
@@ -273,5 +273,7 @@ async def on_app_error(interaction: discord.Interaction, error: app_commands.App
     try: await say(interaction,'操作失敗，請稍後再試。')
     except Exception: log.exception('Unable to report interaction failure')
 
-if __name__=='__main__':
-    bot.run(config.DISCORD_TOKEN,log_handler=None)
+if __name__ == '__main__':
+    start_health_server()
+    log.info('HTTP health server started')
+    bot.run(config.DISCORD_TOKEN, log_handler=None)
