@@ -1,43 +1,134 @@
+"""Render an EchoNest character card using Pillow; no image generation call."""
 import io
 import os
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat
 
-FONT_PATHS = ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-              '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
-              'C:/Windows/Fonts/msjh.ttc']
+SIZE = (1600, 960)
+FONT_DIR = os.path.join(os.path.dirname(__file__), 'fonts')
+FONT_CJK = [os.path.join(FONT_DIR, 'NotoSansCJK-Regular.ttc'), '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc', 'C:/Windows/Fonts/msjh.ttc']
+FONT_SERIF = ['/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf', '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf']
+FONT_NUMBER = ['/usr/share/fonts/truetype/liberation2/LiberationSerif-Italic.ttf', '/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf']
+FONT_SANS = ['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf']
 
-def font(size):
-    for path in FONT_PATHS:
-        if os.path.exists(path):
-            return ImageFont.truetype(path,size)
+def font(size, kind='cjk'):
+    paths = {'cjk': FONT_CJK, 'serif': FONT_SERIF, 'number': FONT_NUMBER, 'sans': FONT_SANS}[kind]
+    for path in paths:
+        if os.path.isfile(path):
+            return ImageFont.truetype(path, size)
     return ImageFont.load_default()
 
+def mix(a, b, t):
+    return tuple(round(a[i]*(1-t)+b[i]*t) for i in range(3))
+
+def theme_color(portrait):
+    if not portrait:
+        return (177, 141, 197)
+    try:
+        with Image.open(io.BytesIO(portrait)) as im:
+            im = im.convert('RGB').resize((96,96))
+            colors = im.quantize(colors=16).convert('RGB').getcolors(96*96) or []
+        candidates = []
+        for count, color in colors:
+            r,g,b = color
+            spread = max(color)-min(color)
+            light = (r+g+b)/3
+            if 50 < light < 210 and spread > 15 and not (r>g*1.15 and g>b*1.1):
+                candidates.append((count*min(spread,75), color))
+        if candidates:
+            raw = max(candidates)[1]
+            return mix(raw, (187,164,211), .38)
+    except Exception:
+        pass
+    return (177, 141, 197)
+
+def fitted_font(draw, text, max_width, start, minimum=22, kind='cjk'):
+    for size in range(start,minimum-1,-2):
+        f = font(size,kind)
+        if draw.textbbox((0,0),text,font=f)[2] <= max_width:
+            return f
+    return font(minimum,kind)
+
 def render_card(name, personality, owner, mood, affection, level, exp, portrait=None):
-    image=Image.new('RGB',(1000,580),'#10151f')
-    d=ImageDraw.Draw(image)
-    d.rounded_rectangle((30,30,970,550),radius=32,fill='#1b2534',outline='#33445d',width=2)
-    d.text((70,55),'ECHONEST  /  CHARACTER',font=font(20),fill='#93abc8')
-    d.text((70,100),str(name)[:24],font=font(42),fill='#f1f5fc')
-    d.text((70,170),f'性格  {personality}',font=font(24),fill='#b8c9dd')
-    d.text((70,218),f'擁有者  {owner}',font=font(22),fill='#b8c9dd')
-    d.text((70,290),f'等級  {level}',font=font(27),fill='#f1f5fc')
-    d.text((70,338),f'好感度  {affection}',font=font(24),fill='#f1f5fc')
-    def bar(y,title,value,max_value,color):
-        d.text((70,y),f'{title}  {value}/{max_value}',font=font(19),fill='#b8c9dd')
-        d.rounded_rectangle((70,y+34,575,y+51),radius=8,fill='#344255')
-        w=int(505*max(0,min(value/max_value,1)))
-        if w: d.rounded_rectangle((70,y+34,70+w,y+51),radius=8,fill=color)
-    bar(393,'心情',int(mood),100,'#64c7b0')
-    bar(463,'EXP',int(exp)%100,100,'#82a9ff')
-    d.rounded_rectangle((635,108,920,443),radius=20,fill='#29364a')
+    accent = theme_color(portrait)
+    pale = mix(accent,(255,245,255),.62)
+    muted = mix(accent,(91,82,106),.58)
+    bg = (24,23,32)
+    im = Image.new('RGB', SIZE, bg)
+    d = ImageDraw.Draw(im)
+    # Subtle horizontal background gradient, deliberately without glow.
+    for y in range(960):
+        shade = round(7*y/960)
+        d.line((0,y,1599,y),fill=(bg[0]+shade,bg[1]+shade,bg[2]+shade))
+    # Double frame and handcrafted corner strokes.
+    d.rounded_rectangle((20,20,1580,940),radius=27,outline=pale,width=9)
+    d.rounded_rectangle((33,33,1567,927),radius=19,outline=muted,width=2)
+    for sx in (1,-1):
+        for sy in (1,-1):
+            x = 40 if sx==1 else 1560
+            y = 40 if sy==1 else 920
+            d.line([(x,y+sy*50),(x,y),(x+sx*75,y)],fill=pale,width=3)
+            d.line([(x+sx*9,y+sy*60),(x+sx*9,y+sy*9),(x+sx*85,y+sy*9)],fill=muted,width=2)
+    # Header.
+    d.text((84,63),'E C H O N E S T   /   C H A R A C T E R',font=font(23,'sans'),fill=pale)
+    d.line((550,81,743,81),fill=muted,width=2)
+    d.text((1405,61),'No. 001',font=font(24,'sans'),fill=pale)
+    # Character title; large serif English and a clear CJK fallback.
+    name = str(name or 'Unnamed')
+    english = all(ord(ch)<128 for ch in name)
+    title_kind = 'serif' if english else 'cjk'
+    title = fitted_font(d,name,660,180 if english else 115,36,title_kind)
+    d.text((84,116),name,font=title,fill=(246,234,250),stroke_width=0)
+    name_bottom = d.textbbox((84,116),name,font=title)[3]
+    tag_y = max(292,min(335,name_bottom+12))
+    personality = str(personality or '未設定')
+    tag_font = fitted_font(d,personality,260,32,20)
+    tag_w = min(310,max(170,d.textbbox((0,0),personality,font=tag_font)[2]+56))
+    d.rounded_rectangle((84,tag_y,84+tag_w,tag_y+57),radius=9,outline=pale,width=2)
+    d.text((110,tag_y+8),personality,font=tag_font,fill=(245,235,249))
+    # Section break.
+    d.line((88,395,723,395),fill=muted,width=2)
+    d.polygon([(84,395),(96,383),(108,395),(96,407)],fill=pale)
+    d.text((92,425),'等級',font=font(39),fill=(235,224,240))
+    d.text((225,397),str(level),font=font(94,'number'),fill=(245,231,249))
+    d.line((330,466,399,466),fill=muted,width=2)
+    def stat(y, symbol, label, value, maximum):
+        x=91
+        d.text((x,y-8),symbol,font=font(43,'sans'),fill=pale)
+        d.text((172,y),label,font=font(31),fill=(245,237,248))
+        maximum=max(1,int(maximum))
+        d.text((287,y+4),f'{value} / {maximum}',font=font(27,'sans'),fill=pale)
+        d.rounded_rectangle((171,y+53,716,y+75),radius=11,fill=(48,44,59),outline=muted,width=2)
+        ratio=max(0,min(float(value)/maximum,1))
+        if ratio>0:
+            width=max(9,round(541*ratio))
+            d.rounded_rectangle((173,y+55,173+width,y+73),radius=9,fill=pale)
+    stat(502,'♡','好感度',int(affection),100)
+    stat(604,'☁','心情',int(mood),100)
+    stat(706,'✧','EXP',int(exp)%100,100)
+    # Portrait panel.
+    frame=(782,88,1544,805)
+    d.rounded_rectangle((frame[0]-3,frame[1]-3,frame[2]+3,frame[3]+3),radius=20,outline=pale,width=4)
+    box=(frame[2]-frame[0],frame[3]-frame[1])
     if portrait:
         try:
-            with Image.open(io.BytesIO(portrait)) as p:
-                p=ImageOps.fit(p.convert('RGB'),(285,335))
-                image.paste(p,(635,108))
+            with Image.open(io.BytesIO(portrait)) as src:
+                pic=ImageOps.fit(src.convert('RGB'),box,method=Image.Resampling.LANCZOS,centering=(.5,.42))
+            mask=Image.new('L',box,0)
+            ImageDraw.Draw(mask).rounded_rectangle((0,0,box[0]-1,box[1]-1),radius=17,fill=255)
+            im.paste(pic,(frame[0],frame[1]),mask)
         except Exception:
-            pass
+            d.text((1025,435),'NO IMAGE',font=font(30,'sans'),fill=pale)
     else:
-        d.text((695,250),'NO IMAGE',font=font(23),fill='#91a4bd')
-    out=io.BytesIO();image.save(out,format='PNG');out.seek(0)
+        d.text((1025,435),'NO IMAGE',font=font(30,'sans'),fill=pale)
+    # Bottom owner strip.
+    d.line((70,827,1530,827),fill=muted,width=2)
+    owner = str(owner or '未知')
+    d.text((93,850),'●',font=font(32,'sans'),fill=pale)
+    label='擁有者：'+owner
+    d.text((165,852),label,font=fitted_font(d,label,1100,31,18),fill=pale)
+    for x in (1430,1467,1504):
+        d.polygon([(x,861),(x+8,873),(x+20,879),(x+8,885),(x,897),(x-8,885),(x-20,879),(x-8,873)],fill=pale)
+    out=io.BytesIO()
+    im.save(out,'PNG')
+    out.seek(0)
     return out

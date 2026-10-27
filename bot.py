@@ -204,7 +204,18 @@ async def status(i:discord.Interaction):
     if not c:return await say(i,'請先建立或切換角色。')
     aff=await bot.pool.fetchval('SELECT points FROM affection WHERE character_id=$1 AND user_id=$2',c['id'],i.user.id) or 0
     portrait=await fetch_portrait(c['image_url'])
-    card=await asyncio.to_thread(render_card,c['name'],c['personality'],str(c['owner_id']),c['mood'],aff,c['level'],c['exp'],portrait)
+    owner_name = str(c['owner_id'])
+    if c['scope_type'] == 'guild' and i.guild:
+        owner_name = i.guild.name
+    else:
+        try:
+            owner_user = i.guild.get_member(c['owner_id']) if i.guild else None
+            if owner_user is None:
+                owner_user = bot.get_user(c['owner_id']) or await bot.fetch_user(c['owner_id'])
+            owner_name = owner_user.display_name
+        except (discord.HTTPException, AttributeError):
+            pass
+    card=await asyncio.to_thread(render_card,c['name'],c['personality'],owner_name,c['mood'],aff,c['level'],c['exp'],portrait)
     await i.followup.send(file=discord.File(card,filename='character.png'),ephemeral=True)
 
 async def respond(i,message):
