@@ -69,7 +69,7 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
             d.line([(x,y+sy*50),(x,y),(x+sx*75,y)],fill=pale,width=3)
             d.line([(x+sx*9,y+sy*60),(x+sx*9,y+sy*9),(x+sx*85,y+sy*9)],fill=muted,width=2)
     # Header.
-    d.text((90,70),'E C H O N E S T   /   C H A R A C T E R',font=font(23,'sans'),fill=pale)
+    d.text((90,72),'E C H O N E S T   /   C H A R A C T E R',font=font(23,'sans'),fill=pale)
     d.line((550,81,743,81),fill=muted,width=2)
     # Character title; large serif English and a clear CJK fallback.
     name = str(name or 'Unnamed')
@@ -84,12 +84,12 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     tag_font = fitted_font(d,personality,260,32,20)
     tag_w = min(310,max(170,d.textbbox((0,0),personality,font=tag_font)[2]+56))
     d.rounded_rectangle((84,tag_y,84+tag_w,tag_y+57),radius=9,outline=pale,width=2)
-    d.text((136,tag_y+7),personality,font=tag_font,fill=(245,235,249))
+    d.text((136,tag_y+5),personality,font=tag_font,fill=(245,235,249))
     # Section break.
     d.line((88,395,710,395),fill=muted,width=2)
     d.polygon([(84,395),(96,383),(108,395),(96,407)],fill=pale)
-    d.text((92,425),'等級',font=font(39),fill=(235,224,240))
-    d.text((225,400),str(level),font=font(94,'number'),fill=(245,231,249))
+    d.text((80,425),'等級',font=font(39),fill=(235,224,240))
+    d.text((200,400),str(level),font=font(94,'number'),fill=(245,231,249))
     def stat(y, label, value, maximum):
         d.text((100,y-5),label,font=font(31),fill=(245,237,248))
         maximum=max(1,int(maximum))
@@ -121,7 +121,7 @@ def render_card(name, personality, owner, mood, affection, level, exp, portrait=
     # Bottom owner strip.
     d.line((70,827,1530,827),fill=muted,width=2)
     owner = str(owner or '未知')
-    label='擁有者：'+owner
+    label='主人：'+owner
     d.text((150,855),label,font=fitted_font(d,label,1100,31,18),fill=pale)
     for x in (1430,1467,1504):
         d.polygon([(x,861),(x+8,873),(x+20,879),(x+8,885),(x,897),(x-8,885),(x-20,879),(x-8,873)],fill=pale)
