@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import random
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -19,7 +20,41 @@ from images import create_image, upload_image, delete_image, ImageProviderError
 logging.basicConfig(level=config.env('LOG_LEVEL','INFO'),format='%(asctime)s %(levelname)s [%(name)s] %(message)s')
 log=logging.getLogger('echonest')
 TZ=timezone(timedelta(hours=8))
-PERSONALITIES=['傲嬌','毒舌','活潑','冷淡','溫柔','天然呆','腹黑','成熟','自訂']
+PERSONALITIES = ['傲嬌', '毒舌', '活潑', '冷淡', '溫柔', '天然呆', '腹黑', '成熟', '自訂']
+PERSONALITY_PROMPTS = {
+    '傲嬌': '有自尊心、不擅長坦率表達在意，但關心時也能直接說出口。偶爾嘴硬或吐槽，更多時候正常聊天；不要固定結巴、重複否認或套用「才不是」等口頭禪。',
+    '毒舌': '觀察敏銳，偶爾一針見血地吐槽，幽默但不刻薄。遇到認真問題就直接回答，不必每句都嘲諷。',
+    '活潑': '好奇心強、反應靈活，會隨話題調整節奏。開心時熱情，認真時也能安靜；不必每句都驚嘆。',
+    '冷淡': '表達簡潔、情緒內斂，但並非沒有感情。熟悉時會自然流露關心，不必刻意句句冷漠。',
+    '溫柔': '善於理解他人，說話體貼而不過度安慰。能開玩笑、表達不同意見，不必每句都安撫。',
+    '天然呆': '想法單純、聯想有趣，偶爾出現意料外的理解；大部分時間能正常溝通，不要刻意裝傻。',
+    '腹黑': '心思細膩，偶爾帶點狡黠的玩笑，知道分寸；不必每句都暗示算計或捉弄。',
+    '成熟': '沉著、有分寸，能給實際建議，也有輕鬆隨性的一面；不要每句都像在說教。',
+}
+
+def character_prompt(character):
+    personality = character['personality']
+    preset = PERSONALITY_PROMPTS.get(personality, personality)
+    return (f'角色名稱：{character["name"]}\n角色性格：{preset}\n'
+            f'額外設定：{character["description"] or "無"}\n'
+            '像真實聊天一樣自然回應，根據當下話題、情緒與對話歷史改變措辭。'
+            '性格是傾向，不是固定台詞或口癖；避免反覆使用相同句型、結巴、動作括號或誇張語氣。'
+            '優先回應玩家真正說的內容，不要每次都主動轉移話題。'
+            '使用繁體中文，回覆最多20個字（含標點），盡量用完整的短句。')
+
+EXPLORATION_EVENTS = [
+    ('雨後小巷', '雨剛停，牆邊的積水映出一盞舊路燈。你順著微弱的光走去，在石階旁發現了{item}。'),
+    ('夜市轉角', '攤販正忙著收拾，風把一張紙條吹到你腳邊。你替老闆撿起來，他笑著送你{item}。'),
+    ('森林步道', '樹葉沙沙作響，前方傳來細小的碰撞聲。你撥開草叢，發現一件被落葉蓋住的{item}。'),
+    ('舊書店', '店裡的時鐘停在三點。你幫店主整理角落的紙箱，意外找到一件{item}，店主說可以送給你。'),
+    ('河岸長椅', '你在河邊停下腳步，看見有人匆匆離開時遺落了一個袋子。你交給巡邏人員後，獲得了{item}作為謝禮。'),
+    ('山頂觀景台', '雲層散開，遠方的城市逐漸亮起。你在觀景台旁的小攤完成一場猜謎，贏得了{item}。'),
+    ('安靜的車站', '末班車尚未到站，廣播忽然傳來失真的旋律。你幫忙找回遺失的行李，收到{item}作為感謝。'),
+    ('午後公園', '一隻小鳥停在告示牌上，旁邊正在舉辦小型交換市集。你用找到的代幣換得了{item}。'),
+    ('海邊燈塔', '潮聲一陣接著一陣，你沿著燈塔旁的階梯往上走。守塔人講完一段往事後，送你一件{item}。'),
+    ('古老鐘樓', '鐘聲響起時，一扇原本關著的小門慢慢打開。你完成守門人的簡單委託，拿到了{item}。'),
+]
+
 GIFTS={'花束':3,'巧克力':4,'茶':2,'書':5,'玩偶':6,'餅乾':2,'明信片':3,'音樂盒':8,
        '羽毛筆':3,'星星吊飾':5,'香氛蠟燭':5,'手作卡片':4,'玻璃珠':2,'木製書籤':3,
        '毛線帽':5,'小盆栽':5,'鑰匙圈':3,'摺紙':2,'幸運石':3,'絲帶':2,
@@ -37,7 +72,7 @@ def make_embed(text): return discord.Embed(description=text[:3900],color=0x678bc
 
 class EchoNest(commands.Bot):
     def __init__(self):
-        intents=discord.Intents.default();intents.members=True
+        intents=discord.Intents.default();intents.members=True;intents.message_content=True
         super().__init__(command_prefix='!',intents=intents,allowed_mentions=discord.AllowedMentions.none())
         self.pool=None;self.ai_lock=asyncio.Lock();self.proactive_task=None
 
@@ -84,7 +119,8 @@ class EchoNest(commands.Bot):
                         try:
                             async with self.ai_lock:
                                 msg=await generate(config.GEMINI_API_KEY,config.GEMINI_MODEL,
-                                  c['personality']+' '+c['description'],[{'role':'user','content':'請自然地發一句簡短的問候，不要假裝有真實身體。'}])
+                                  character_prompt(c),[{'role':'user','content':'請自然地發一句簡短的問候，不要假裝有真實身體。'}])
+                            msg=msg.strip()[:20]
                             user=await self.fetch_user(r['user_id'])
                             await user.send(embed=make_embed(f'**{c["name"]}**\n{msg}'))
                         except (discord.Forbidden,discord.HTTPException):
@@ -218,11 +254,20 @@ async def status(i:discord.Interaction):
     card=await asyncio.to_thread(render_card,c['name'],c['personality'],owner_name,c['mood'],aff,c['level'],c['exp'],portrait)
     await i.followup.send(file=discord.File(card,filename='character.png'),ephemeral=True)
 
-async def respond(i,message):
-    if not 1<=len(message.strip())<=1000:return await say(i,'訊息長度需為 1～20字。')
-    await i.response.defer(thinking=True)
-    c=await selected(i)
-    if not c:return await say(i,'請先建立或切換角色。')
+async def respond(i, message, dm_message=None):
+    async def notify(text):
+        if dm_message is not None:
+            await dm_message.channel.send(text)
+        else:
+            await say(i, text)
+
+    if not 1 <= len(message.strip()) <= 1000:
+        return await notify('訊息長度需為 1～1000字。')
+    if dm_message is None:
+        await i.response.defer(thinking=True)
+    c = await selected(i)
+    if not c:
+        return await notify('請先建立或切換角色。')
     async with bot.ai_lock:
         history=await bot.pool.fetch('''SELECT role,content,user_id FROM chat_messages
           WHERE character_id=$1 ORDER BY id DESC LIMIT 20''',c['id'])
@@ -236,14 +281,13 @@ async def respond(i,message):
             reply = await generate(
                 config.GEMINI_API_KEY,
                 config.GEMINI_MODEL,
-                c['personality'] + ' ' + c['description']
-                + '\n請使用繁體中文回覆，每次回覆不得超過30個字（包含標點符號）。保持角色性格，回答自然簡短，但要正確回答到問題。',
+                character_prompt(c),
                 turns,
                 summary + '\n' + '\n'.join(matched)
             )
             reply = reply.strip()[:20]
         except Exception:
-            log.exception('Chat failed character=%s',c['id']);return await say(i,'AI 暫時無法回覆。')
+            log.exception('Chat failed character=%s',c['id']);return await notify('AI 暫時無法回覆。')
         async with bot.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute('INSERT INTO chat_messages(character_id,user_id,role,content) VALUES($1,$2,$3,$4)',c['id'],i.user.id,'user',message)
@@ -271,6 +315,24 @@ async def respond(i,message):
 
 @bot.tree.command(name='聊天',description='與目前角色對話')
 async def chat(i:discord.Interaction,訊息:str):await respond(i,訊息)
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Only direct messages trigger plain-text chat; guild messages are ignored.
+    if message.author.bot or message.guild is not None:
+        return
+    if not message.content or not message.content.strip():
+        return
+    if message.content.startswith('!'):
+        await bot.process_commands(message)
+        return
+    interaction_like = SimpleNamespace(user=message.author, guild_id=None)
+    try:
+        async with message.channel.typing():
+            await respond(interaction_like, message.content, dm_message=message)
+    except Exception:
+        log.exception('DM message processing failed user=%s', message.author.id)
+        await message.channel.send('處理訊息時發生錯誤，請稍後再試。')
 
 @bot.tree.command(name='聊天設定',description='設定私人訊息主動發言')
 @app_commands.choices(頻率=[app_commands.Choice(name=n,value=v) for n,v in [('偶爾','occasional'),('一般','normal'),('活躍','active')]])
@@ -342,20 +404,39 @@ async def gift(i:discord.Interaction,禮物:str):
                 await conn.execute('UPDATE characters SET mood=LEAST(100,mood+2) WHERE id=$1',c['id'])
     await say(i,f'已送出 {禮物}，好感度 +{GIFTS[禮物]}。' if used is not None else '背包沒有這件物品。')
 
-@bot.tree.command(name='探索',description='探索並獲得隨機物品，每日最多五次')
+@bot.tree.command(name='探索',description='生成隨機冒險故事並獲得物品，每日最多五次')
 async def explore(i:discord.Interaction):
+    await i.response.defer(thinking=True, ephemeral=True)
     kind,sid=area(i)
     item=random.choice(list(GIFTS))
+    scene=random.choice(['雨夜小鎮','山中遺跡','海港市集','地下圖書館','森林車站','浮空花園','舊城巷弄','迷霧燈塔','荒廢遊樂園','河畔村莊'])
+    event=random.choice(['偶然相遇','奇怪的委託','意外發現','一場誤會','解開小謎題','幫助陌生人','不可思議的巧合'])
     async with bot.pool.acquire() as conn:
         async with conn.transaction():
-            count=await conn.fetchval('''INSERT INTO explorations(scope_type,scope_id,user_id,day,count)
+            count=await conn.fetchval("""INSERT INTO explorations(scope_type,scope_id,user_id,day,count)
               VALUES($1,$2,$3,$4,1) ON CONFLICT(scope_type,scope_id,user_id,day)
-              DO UPDATE SET count=explorations.count+1 WHERE explorations.count<5 RETURNING count''',kind,sid,i.user.id,day())
+              DO UPDATE SET count=explorations.count+1 WHERE explorations.count<5 RETURNING count""",kind,sid,i.user.id,day())
             if count:
                 await add_item(conn,kind,sid,i.user.id,item)
-                await conn.execute('''INSERT INTO collections(scope_type,scope_id,user_id,key) VALUES($1,$2,$3,$4)
-                  ON CONFLICT DO NOTHING''',kind,sid,i.user.id,'初次探索')
-    await say(i,f'探索獲得「{item}」。今日 {count}/5 次。' if count else '今天已探索五次，明天再來。')
+                await conn.execute("""INSERT INTO collections(scope_type,scope_id,user_id,key) VALUES($1,$2,$3,$4)
+                  ON CONFLICT DO NOTHING""",kind,sid,i.user.id,'初次探索')
+    if not count:
+        return await say(i,'今天已探索五次，明天再來。')
+
+    # The reward is committed by the game; AI generates narrative only.
+    story_prompt=(f'你是文字冒險遊戲的敘事者。以繁體中文寫一段約100～180字的完整短篇探索故事。'
+                  f'地點：{scene}。事件：{event}。結尾自然獲得物品「{item}」。'
+                  '每次創作不同人物、衝突、轉折和細節，不要使用制式開頭。'
+                  '不要列出數值、不要宣稱獲得其他道具、不要用Markdown標題。')
+    try:
+        async with bot.ai_lock:
+            story=await generate(config.GEMINI_API_KEY,config.GEMINI_MODEL,
+                                 story_prompt,[{'role':'user','content':'開始這次探索。'}])
+        story=story.strip()[:850]
+    except Exception:
+        log.exception('Exploration story generation failed')
+        story=f'你來到{scene}，經歷了{event}。在一番探索後，你意外得到了{item}。'
+    await i.followup.send(f'**{scene}**\n{story}\n\n🎁 獲得：{item} ×1\n今日探索：{count}/5',ephemeral=True)
 
 @bot.tree.command(name='任務',description='領取每日探索任務獎勵')
 async def quests(i:discord.Interaction):
